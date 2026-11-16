@@ -1,0 +1,166 @@
+#!/bin/bash
+# thoth: open Thoth (web UI over tmux session "cc").
+#   thoth          open the native app (falls back to the web UI)
+#   thoth web      start the server if needed and open the web UI window
+#   thoth stop     stop the server (Claude sessions keep running in tmux)
+#   thoth restart  restart the server
+#   thoth status   show server and session status
+#   thoth tui      plain tmux view (fallback)
+#   thoth services install|uninstall|status   keep server + brain running after logout/reboot
+#   thoth doctor [--fix]   explain common faults with the exact fix; --fix repairs what is safe
+#   thoth adopt    move the Claude Code or Codex session of this terminal into the panel
+#                     (Claude: the /panel command; Codex: type !thoth adopt; or: thoth adopt <session-id>)
+set -u
+APP_DIR="${CC_PANEL_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+PORT="${CC_PANEL_PORT:-7878}"
+URL="http://127.0.0.1:$PORT"
+STATE="${CC_PANEL_HOME:-$HOME/.config/cc-panel}"
+LOG="$STATE/server.log"
+SCHEME="${CC_PANEL_URL_SCHEME:-claudepanel}"
+TMUX_ARGS=(); [ -n "${CC_PANEL_TMUX_SOCKET:-}" ] && TMUX_ARGS=(-L "$CC_PANEL_TMUX_SOCKET")
+export PATH="$HOME/.local/share/claude-panel/node/bin:$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/local/bin:$PATH"
+NODE="$(command -v node)"   # the installer's private Node 22 comes first (scripts/install.sh)
+mkdir -p "$(dirname "$LOG")"
+
+up() { curl -s -o /dev/null --max-time 1 "$URL/api/state"; }
+SERVICES="$APP_DIR/scripts/services.sh"
+# true when `thoth services install` was run: then systemd/launchd owns the server
+managed() { [ -x "$SERVICES" ] && "$SERVICES" installed >/dev/null 2>&1; }
+
+start_server() {
+  up && return 0
+  if managed; then
+    "$SERVICES" ctl start server >/dev/null 2>&1
+    for _ in $(seq 1 50); do up && return 0; sleep 0.2; done
+  fi
+  # the subshell must not keep the caller's stdout/stderr open, or a caller that reads our
+  # output (a pipe) never sees the end
+  # No `nohup`: on a Mac reached over SSH with nobody logged in at the screen, macOS nohup stops
+  # with "can't detach from console" and the server never starts (found on a clean cloud Mac,
+  # a test run). An ignored HUP is inherited through exec: same effect.
+  (cd "$APP_DIR" && trap '' HUP && exec "$NODE" "$APP_DIR/server.js" >>"$LOG" 2>&1 </dev/null &) >/dev/null 2>&1 </dev/null
+  for _ in $(seq 1 50); do up && return 0; sleep 0.1; done
+  echo "Server did not start. See $LOG"; exit 1
+}
+
+# only the server on this port (other instances keep running)
+stop_server() {
+  if managed; then "$SERVICES" ctl stop server >/dev/null 2>&1; return 0; fi
+  local p; p=$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null)
+  # a machine without lsof (minimal Linux): ask ss
+  [ -z "$p" ] && p=$(ss -ltnpH "sport = :$PORT" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
+  [ -n "$p" ] && kill $p 2>/dev/null; true
+}
+
+# A machine without a desktop (a server, an SSH login): say where the panel is instead of
+# trying to open a browser (found on a clean Ubuntu).
+headless() { [ "$(uname -s)" != Darwin ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; }
+show_address() {
+  echo "The panel is running at $URL"
+  echo "This machine has no desktop. To open it from your laptop:"
+  echo "    ssh -N -L $PORT:127.0.0.1:$PORT $(id -un)@$(hostname -f 2>/dev/null || hostname)"
+  echo "  then open $URL in the laptop's browser."
+}
+
+open_window() {
+  # CC_PANEL_NO_OPEN=1: start the server but open no window (a Mac reached over SSH; the install
+  # an install test, which must not open windows on the tester's screen)
+  if [ -n "${CC_PANEL_NO_OPEN:-}" ]; then echo "The panel is running at $URL"; return; fi
+  if headless; then show_address; return; fi
+  if [ "$(uname -s)" != Darwin ]; then xdg-open "$URL" >/dev/null 2>&1 || show_address; return; fi
+  local chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  # bring an open panel window to the front if there is one
+  if osascript -e 'tell application "Google Chrome" to get title of every window' 2>/dev/null | grep -q "Thoth"; then
+    osascript -e 'tell application "Google Chrome"
+      set index of (first window whose title contains "Thoth") to 1
+      activate
+    end tell' >/dev/null 2>&1
+    return
+  fi
+  if [ -x "$chrome" ]; then
+    "$chrome" --app="$URL" --window-size=1400,880 >/dev/null 2>&1 &
+  else
+    open "$URL"
+  fi
+}
+
+NATIVE_APP="$HOME/Applications/Thoth.app"
+# an install from before the rename that has not rebuilt the app yet
+[ -d "$NATIVE_APP" ] || { [ -d "$HOME/Applications/Claude Panel.app" ] && NATIVE_APP="$HOME/Applications/Claude Panel.app"; }
+
+# The Claude Code or Codex process that owns this shell: walk up the parent chain.
+# Prints "<agent> <pid>".
+agent_pid() {
+  local p=$PPID comm
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ -z "$p" ] || [ "$p" -le 1 ] && return 1
+    comm=$(ps -o comm= -p "$p" 2>/dev/null)
+    case "$(basename "${comm:-x}")" in
+      claude|claude.exe) echo "claude $p"; return 0 ;;
+      codex|codex.exe) echo "codex $p"; return 0 ;;
+    esac
+    p=$(ps -o ppid= -p "$p" | tr -d ' ')
+  done
+  return 1
+}
+
+# The conversation id of a Codex process: the record (sessions/…/rollout-<time>-<id>.jsonl) that
+# it or one of its child processes keeps open. Codex writes the record with the first message.
+codex_sid() {
+  local all="$1" level="$1" next files f
+  for _ in 1 2 3 4 5 6; do
+    next=$(pgrep -P "$(printf '%s' "$level" | tr ' ' ',')" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    [ -n "$next" ] || break
+    all="$all $next"; level="$next"
+  done
+  files=$(lsof -p "$(printf '%s' "$all" | tr ' ' ',')" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -E '/sessions/.*/rollout-.*\.jsonl$' | sort -u)
+  [ -n "$files" ] || return 1
+  # the newest record if several are open
+  f=$(printf '%s\n' "$files" | while read -r x; do printf '%s %s\n' "$(stat -f %m "$x" 2>/dev/null || stat -c %Y "$x")" "$x"; done | sort -rn | head -1 | cut -d' ' -f2-)
+  basename "$f" .jsonl | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+adopt() {
+  local sid="${1:-}" found agent pid folder="$PWD" resp id
+  found=$(agent_pid) || { echo "thoth adopt: run this from inside Claude Code (type /panel) or Codex (type !thoth adopt)"; exit 1; }
+  agent=${found% *}; pid=${found#* }
+  if [ "$agent" = codex ]; then
+    [ -n "$sid" ] || sid=$(codex_sid "$pid") || { echo "thoth adopt: this Codex has no conversation yet; send it a message first"; exit 1; }
+  else
+    sid="${sid:-${CLAUDE_CODE_SESSION_ID:-}}"
+    [ -n "$sid" ] || { echo "thoth adopt: no session id (CLAUDE_CODE_SESSION_ID is not set)"; exit 1; }
+  fi
+  start_server
+  resp=$(curl -s -H 'Content-Type: application/json' -H "Origin: $URL" -X POST \
+    -d "{\"sid\":\"$sid\",\"agent\":\"$agent\",\"folder\":$(printf '%s' "$folder" | python3 -I -c 'import json,sys;print(json.dumps(sys.stdin.read()))'),\"pid\":$pid}" "$URL/api/adopt")
+  id=$(printf '%s' "$resp" | python3 -I -c 'import json,sys;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+  [ -n "$id" ] || { echo "thoth adopt failed: $resp"; exit 1; }
+  if [ -x "$NATIVE_APP/Contents/MacOS/ClaudePanel" ]; then open "$SCHEME://session/${id/@/%40}"; else open_window; fi
+  if printf '%s' "$resp" | grep -q '"already":true'; then echo "This session is already in Thoth."; return; fi
+  local who=Claude; [ "$agent" = codex ] && who=Codex
+  echo "Moving this session to Thoth. This terminal's $who will exit now; the conversation continues in the panel."
+  # exit the outside agent after this command returns; the panel resumes it when it is gone
+  ( sleep 1; kill -TERM "$pid" ) >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
+case "${1:-open}" in
+  open)
+    if [ -x "$NATIVE_APP/Contents/MacOS/ClaudePanel" ]; then start_server; open "$NATIVE_APP"
+    else start_server; open_window; fi ;;
+  web) start_server; open_window ;;
+  stop) stop_server; echo "Server stopped. Claude sessions are still running in tmux." ;;
+  restart)
+    if managed; then "$SERVICES" ctl restart server >/dev/null 2>&1; for _ in $(seq 1 50); do up && break; sleep 0.2; done
+    else stop_server; sleep 0.5; start_server; fi
+    echo "Server restarted." ;;
+  services) shift; exec "$SERVICES" "${1:-status}" "${@:2}" ;;
+  doctor) shift; exec "$SERVICES" doctor "$@" ;;
+  status)
+    up && echo "server: running on $URL" || echo "server: stopped"
+    tmux ${TMUX_ARGS[@]+"${TMUX_ARGS[@]}"} list-windows -t cc -F '  #{window_name}: #{pane_current_command} in #{pane_current_path}' 2>/dev/null || echo "  no tmux session"
+    ;;
+  tui) exec tmux ${TMUX_ARGS[@]+"${TMUX_ARGS[@]}"} attach -t cc ;;
+  adopt) shift; adopt "${1:-}" ;;
+  *) sed -n '2,12p' "$0"; exit 1 ;;
+esac

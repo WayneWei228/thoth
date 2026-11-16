@@ -1,0 +1,8 @@
+node_modules
+.DS_Store
+*.log
+macos/.build/
+macos/build/
+dist/
+__pycache__/
+*.pyc

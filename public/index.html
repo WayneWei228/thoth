@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thoth</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/xterm.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head">
+      <div class="brand"><img class="logo" src="/logo.svg" alt=""> Thoth</div>
+      <button id="btn-new" class="btn primary" title="Start or resume a session">+ New</button>
+    </div>
+    <form id="ask" class="ask">
+      <textarea id="ask-text" rows="2" placeholder="Ask anything. I will send it to the right session…"></textarea>
+      <div class="ask-row"><span class="ask-hint">Enter to send · Shift+Enter new line</span><button class="btn primary small" type="submit">Ask</button></div>
+    </form>
+    <div id="attention" class="attention hidden"></div>
+    <div class="side-tools">
+      <input id="filter" type="search" placeholder="Filter sessions…">
+      <button id="btn-overview" class="btn ghost small" title="Show all sessions">Overview</button>
+    </div>
+    <div id="list"></div>
+    <div class="side-foot">
+      <label class="toggle"><input type="checkbox" id="opt-notify"> Notify me</label>
+      <label class="toggle"><input type="checkbox" id="opt-sound"> Sound</label>
+      <span id="conn" class="conn">●</span>
+    </div>
+  </aside>
+
+  <main id="main">
+    <section id="overview" class="overview">
+      <div id="requests-wrap" class="hidden">
+        <h1>Requests</h1>
+        <p class="hint">What you asked from the box on the left, and where it went.</p>
+        <div id="requests" class="requests"></div>
+      </div>
+      <h1>All sessions</h1>
+      <p class="hint">Click a card to open it. Red cards are waiting for you.</p>
+      <div id="grid" class="grid"></div>
+      <div id="empty" class="empty hidden">
+        <p>No sessions yet.</p>
+        <button class="btn primary" onclick="openNew()">+ Start your first session</button>
+      </div>
+    </section>
+
+    <section id="detail" class="detail hidden">
+      <header class="detail-head">
+        <div class="title-wrap">
+          <span id="d-dot" class="dot"></span>
+          <h2 id="d-name" title="Double-click to rename"></h2>
+          <span id="d-agent" class="pill agent hidden">Codex</span>
+          <button id="d-edit" class="edit show" title="Rename this session">✎</button>
+          <span id="d-state" class="pill"></span>
+          <span id="d-title" class="d-title"></span>
+        </div>
+        <div class="meta">
+          <span id="d-folder" class="folder"></span>
+          <span id="d-branch" class="branch"></span>
+        </div>
+        <div class="actions">
+          <button id="a-start" class="btn primary">▶ Resume</button>
+          <button id="a-stop" class="btn warn" title="Interrupt Claude (Esc)">■ Stop</button>
+          <button id="a-finder" class="btn ghost" title="Open folder in Finder">Finder</button>
+          <button id="a-code" class="btn ghost" title="Open folder in VS Code">VS Code</button>
+          <button id="a-close" class="btn ghost danger" title="End this session">✕ Close</button>
+        </div>
+      </header>
+
+      <div id="choice" class="choice hidden">
+        <div class="choice-q"><span class="bell">!</span> <span id="choice-q"></span></div>
+        <div id="choice-opts" class="choice-opts"></div>
+      </div>
+
+      <div id="notice" class="notice hidden"></div>
+
+      <div id="term-wrap"><div id="term"></div></div>
+
+      <form id="composer" class="composer">
+        <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for new line)"></textarea>
+        <button class="btn primary" type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <header><h3>New session</h3><button class="x" onclick="closeModal()">✕</button></header>
+    <div class="step">
+      <div class="label">1. Project folder</div>
+      <div class="folder-row">
+        <input id="m-folder" placeholder="/path/to/project">
+        <button id="m-browse" class="btn">Choose…</button>
+      </div>
+      <div id="m-recent" class="recent"></div>
+    </div>
+    <div class="step">
+      <div class="label">2. Start</div>
+      <div class="start-row">
+        <div id="m-agent" class="seg" role="radiogroup" aria-label="Agent">
+          <button type="button" data-agent="claude" role="radio">Claude Code</button>
+          <button type="button" data-agent="codex" role="radio">Codex</button>
+        </div>
+        <button id="m-fresh" class="btn primary">Start new conversation</button>
+        <span class="or">or continue a previous one:</span>
+      </div>
+      <div id="m-agent-note" class="agent-note hidden"></div>
+      <div id="m-history" class="history"><div class="muted">Choose a folder first.</div></div>
+    </div>
+  </div>
+</div>
+
+<div id="menu" class="ctx hidden"></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="/xterm.js"></script>
+<script src="/addon-fit.js"></script>
+<script src="/addon-web-links.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

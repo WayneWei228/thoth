@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- The Thoth mark at tab size, on a 16 x 16 pixel grid: one panel, three lights (needs you, working, ready), the place where you ask. -->
+  <rect x="1.5" y="2.5" width="13" height="11" rx="2.6" fill="#FBF8F1" stroke="#1B1A17"/>
+  <line x1="6.5" y1="2.5" x2="6.5" y2="13.5" stroke="#1B1A17"/>
+  <rect x="3" y="4" width="2" height="2" rx=".7" fill="#E4472F"/>
+  <rect x="3" y="7" width="2" height="2" rx=".7" fill="#F2A93B"/>
+  <rect x="3" y="10" width="2" height="2" rx=".7" fill="#3DA56A"/>
+  <rect x="8" y="10" width="5" height="2" rx="1" fill="#2947D8"/>
+</svg>

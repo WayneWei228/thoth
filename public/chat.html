@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat</title>
+<link rel="stylesheet" href="/vendor/katex.css">
+<link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+<main id="log" aria-label="Conversation"></main>
+<div id="working" class="working hidden" role="status" aria-label="Claude is working"><span class="spark">✳</span> <span class="live">Claude is working…</span></div>
+<button id="jump" class="jump hidden" aria-label="Jump to latest">↓</button>
+<div id="lightbox" class="lightbox hidden" role="dialog" aria-label="Image preview">
+  <div class="lb-bar">
+    <button type="button" id="lb-download" aria-label="Download image">Download</button>
+    <button type="button" id="lb-close" aria-label="Close preview">Close</button>
+  </div>
+  <img alt="">
+</div>
+<script src="/vendor/marked.js"></script>
+<script src="/vendor/katex.js"></script>
+<script src="/vendor/marked-katex.js"></script>
+<script src="/vendor/purify.js"></script>
+<script src="/vendor/mermaid.js"></script>
+<script src="/thinking.js"></script>
+<script src="/chat.js"></script>
+</body>
+</html>
