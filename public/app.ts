@@ -45,6 +45,7 @@ import { beforeFirstPoll, escapeStops, mayAskNotices, noticeFor, showNotice } fr
 import type { Notice } from './fixes.js';
 import { tidyButton } from './tidy.js';
 import type { TidyHooks } from './tidy.js';
+import * as Restore from './restore.js';
 
 interface Choice {
   n: number;
@@ -93,6 +94,7 @@ interface StateMessage {
   routes?: Route[];
   defaultFolder?: string;
   platform?: string;
+  restoring?: boolean; // the server builds the saved windows again (server.ts ensureSession)
   joins?: JoinRequest[];
   join?: JoinRequest;
   peers?: PeerInfo[]; // the helper computers and their update state (server.ts peersView)
@@ -269,6 +271,7 @@ function setLook(l: string): void {
 // ---------- state socket ----------
 let stateKey: string | null = null;
 function onMessage(m: StateMessage, snapshot = false): void {
+  serverRestoring = m.restoring === true;
   joins.show(m.joins ?? []);
   onPeers(m.peers ?? []);
   onMeta(m);
@@ -651,6 +654,7 @@ interface Composer {
   setText: (t: string) => void;
   clear: () => void;
   setDraftKey: (k: string | null) => void;
+  moveDraft: (k: string, afterRestart: boolean) => void;
   restore: (t: string, att: string[]) => void;
 }
 function readB64(blob: Blob): Promise<string> {
@@ -676,14 +680,21 @@ function makeComposer(parts: ComposerParts): Composer {
     text.style.height = 'auto';
     text.style.height = `${String(Math.max(min, Math.min(max, text.scrollHeight + 2)))}px`;
   }
+  // text and attached files are both kept, so a reload, a crash or a closed tab loses neither (Composer.swift)
   function saveDraft(): void {
     if (draftKey === null) return;
-    store(draftKey, text.value || null);
+    store(Restore.textKey(draftKey), text.value || null);
+    store(Restore.filesKey(draftKey), files.length > 0 ? JSON.stringify(files) : null);
+  }
+  let typed = false; // the box changed since its draft was loaded (moveDraft)
+  function scheduleDraft(): void {
+    typed = true;
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraft, 400);
   }
   text.addEventListener('input', () => {
     fit();
-    clearTimeout(draftTimer);
-    draftTimer = setTimeout(saveDraft, 400);
+    scheduleDraft();
     parts.onText?.();
   });
   text.addEventListener('keydown', (e) => {
@@ -743,6 +754,7 @@ function makeComposer(parts: ComposerParts): Composer {
       'icon-btn ca-x',
       () => {
         setFiles(files.filter((f) => f !== p));
+        scheduleDraft();
         text.focus();
       },
       'xmark',
@@ -762,7 +774,10 @@ function makeComposer(parts: ComposerParts): Composer {
       const name = ATTACH_RE.test(f.name) ? f.name : `pasted${MIME_EXT[f.type] ?? '.png'}`;
       try {
         const { path } = await api('upload', { name, data: await readB64(f) });
-        if (has(path)) setFiles([...files, path]);
+        if (has(path)) {
+          setFiles([...files, path]);
+          scheduleDraft();
+        }
       } catch {
         /* toast shown */
       }
@@ -825,9 +840,29 @@ function makeComposer(parts: ComposerParts): Composer {
     file.value = '';
     void add(l);
   });
-  // the draft is kept (not the files), as in the app
-  const loadDraft = (): string => (draftKey === null ? '' : (stored(draftKey) ?? ''));
-  text.value = loadDraft();
+  // the saved draft of the key: text and the attached files that are still on the server
+  function loadDraft(): void {
+    const k = draftKey;
+    text.value = k === null ? '' : (stored(Restore.textKey(k)) ?? '');
+    const saved = k === null ? [] : Restore.parseFiles(stored(Restore.filesKey(k)));
+    typed = false;
+    setFiles(saved);
+    fit();
+    if (saved.length === 0) return;
+    // a quiet check (no toast): an old server without the action keeps the files
+    void post('attachmentsExist', { paths: saved })
+      .then(async (r) => (r.ok ? ((await r.json()) as { paths?: unknown }) : null))
+      .then((j) => {
+        if (!j || !Array.isArray(j.paths)) return;
+        const left = (j.paths as unknown[]).filter((x): x is string => typeof x === 'string');
+        // only when the box still shows these files (the user may have changed them meanwhile)
+        if (draftKey !== k || files.join('\n') !== saved.join('\n') || left.length === saved.length) return;
+        setFiles(saved.filter((f) => left.includes(f)));
+        saveDraft();
+      })
+      .catch(() => undefined);
+  }
+  loadDraft();
   requestAnimationFrame(fit);
   return {
     focus() {
@@ -843,15 +878,27 @@ function makeComposer(parts: ComposerParts): Composer {
       saveDraft();
       fit();
     },
-    // another draft key (the Session page: one draft per session); the files are dropped
+    // another draft key (the Session page: one draft per session)
     setDraftKey(k) {
       if (k === draftKey) return;
       clearTimeout(draftTimer);
       saveDraft();
       draftKey = k;
-      setFiles([]);
-      text.value = loadDraft();
-      fit();
+      loadDraft();
+    },
+    // Composer.moveDraft: keep the draft in the box under a new key (the session got its transcript id)
+    moveDraft(k, afterRestart) {
+      const old = draftKey;
+      if (old === null) return;
+      const how = Restore.moveDraft(
+        { get: stored, set: store },
+        { old, key: k, boxEmpty: !text.value && files.length === 0, typed, saved: launchPage, afterRestart },
+      );
+      if (how === 'none') return;
+      clearTimeout(draftTimer);
+      draftKey = k;
+      if (how === 'carry') saveDraft();
+      else loadDraft();
     },
     // a failed request goes back into the box, unless the user typed something new
     restore(t, att) {
@@ -872,7 +919,7 @@ const ask = makeComposer({
   attach: $('#ask-attach'),
   min: 70,
   max: 220,
-  draft: 'draft.home',
+  draft: 'home',
   onSend: (t, att) => {
     void sendRequest(t, att);
   },
@@ -933,17 +980,65 @@ function onState(list: Session[], snapshot = false, early = false): void {
     render();
     return;
   }
-  // the open session went away while connected: All Sessions (MainWindow.swift); not on the empty
-  // snapshot a restarted server sends before its first poll
-  if (open !== null && !early && !sessions.some((s) => s.id === open) && (connected || snapshot)) {
+  // the open session: waits during a restore, found by transcript id, or All Sessions when it went away
+  // (MainWindow.swift); not on the empty snapshot a restarted server sends before its first poll
+  if (!early && checkSessionPage(snapshot)) {
     stateKey = key;
-    go('sessions', undefined, true);
     render();
     return;
   }
   if (key === stateKey) return; // nothing visible changed: keep DOM (no lost clicks)
   stateKey = key;
   render();
+}
+
+// ---------- crash restore (MainWindow.swift refresh and LastPage; public/restore.ts) ----------
+// After a reload or a new tab on a saved session page: wait for that session while the server builds
+// the windows again, and find it by its transcript id when tmux gave it a new window id.
+let serverRestoring = false;
+let restoreWait: Restore.RestoreWait = { pending: false, until: null };
+let restoreRetry: ReturnType<typeof setTimeout> | undefined;
+const savedPage = (): Restore.LastPage | null => Restore.parseLastPage(stored(Restore.LAST_PAGE_KEY));
+// the last page saved before this page load (who owns a window-id draft: Restore.moveDraft)
+const launchPage = savedPage();
+// a page the user chose: always saved. From a state update (confirm): only when Restore.shouldSave
+function savePage(p: Page, fromState = false, launching = false): void {
+  const known = p.name === 'session' ? (sessions.find((s) => s.id === p.id)?.sid ?? '') : '';
+  const saved = savedPage();
+  const next = Restore.lastPageFor(p, known, saved);
+  if (fromState && !Restore.shouldSave(next, saved, launching)) return;
+  if (JSON.stringify(next) !== JSON.stringify(saved)) store(Restore.LAST_PAGE_KEY, JSON.stringify(next));
+}
+/** The Session page against the new state. True when it changed the page. */
+function checkSessionPage(snapshot = false): boolean {
+  if (page.name !== 'session') return false;
+  const id = page.id;
+  const launching = restoreWait.pending || restoreWait.until !== null;
+  const { step, wait } = Restore.restoreStep(
+    { id, sessions, connected: connected || snapshot, restoring: serverRestoring, saved: savedPage(), now: Date.now() },
+    restoreWait,
+  );
+  restoreWait = wait;
+  if (step.kind === 'open') {
+    go('session', step.id, true);
+    return true;
+  }
+  if (step.kind === 'sessions') {
+    go('sessions', undefined, true);
+    return true;
+  }
+  if (step.kind === 'wait') {
+    clearTimeout(restoreRetry);
+    restoreRetry = setTimeout(() => {
+      if (checkSessionPage()) render();
+    }, 1000);
+    return false;
+  }
+  if (step.confirm) savePage(page, true, launching);
+  // the draft follows the conversation once the session has a transcript id
+  const s = sessions.find((x) => x.id === id);
+  if (s) detailComposer.moveDraft(Restore.draftKeyFor(id, s.sid), launching || serverRestoring);
+  return false;
 }
 
 // ---------- notifications (main.swift: only when the app is not in front) ----------
@@ -2062,10 +2157,10 @@ function renderDetail(): void {
   }
   $('#d-path').textContent = placeText(s, short) + (has(s.branch) ? `  ·  ⎇ ${s.branch}` : '');
   $('#d-path').title = s.folder;
-  // a helper computer's session: Chat only; its folder is on that computer (no Finder, VS Code, Close)
+  // a helper computer's session: Chat only; its folder is on that computer (no Finder, VS Code)
   $('#d-mode').classList.toggle('hidden', v.chatOnly);
   for (const sel of ['#a-finder', '#a-code']) $(sel).classList.toggle('hidden', !v.localOnly);
-  $('#a-close').classList.toggle('hidden', !v.close); // a pending row on a helper: closing cancels it
+  $('#a-close').classList.toggle('hidden', !v.close); // a helper's session closes on the helper
   $('#d-edit').classList.toggle('hidden', !v.rename);
   $('#a-start').classList.toggle('hidden', !v.start);
   $('#a-start span').textContent = has(s.sid) ? 'Resume' : 'Start';
@@ -2212,6 +2307,7 @@ function show(p: Page): void {
   const newSel = p.name === 'session' ? p.id : null;
   const same = p.name === page.name && newSel === (page.name === 'session' ? page.id : null);
   page = p;
+  savePage(p);
   for (const n of PAGES) $(`#page-${n}`).classList.toggle('hidden', p.name !== n);
   $('#detail').classList.toggle('hidden', p.name !== 'session');
   document.body.classList.remove('side-open'); // narrow window: the overlay closes after a choice
@@ -2226,7 +2322,7 @@ function show(p: Page): void {
     if (newSel === null) detach();
     else {
       $('#choice').dataset['key'] = '-'; // a new session: build the choice bar again
-      detailComposer.setDraftKey(`draft.${newSel}`);
+      detailComposer.setDraftKey(Restore.openKey(newSel, sessions.find((s) => s.id === newSel)?.sid, savedPage()));
       applyMode(false);
       // a helper computer's session has no terminal on this Mac: only Chat
       if (helperOf(newSel) === '')
@@ -2443,7 +2539,9 @@ function showMenu(x: number, y: number, s: Session): void {
       : []),
     // a helper computer's session (lib/peer.ts): its folder is on that computer; it closes there
     ...(has(s.device)
-      ? []
+      ? isOffline(s)
+        ? []
+        : (['-', ['Close Session', () => void closeSession(s)]] as (MenuItem | '-')[])
       : ([
           '-',
           ['New Session in This Folder', run(() => openNew(s.folder))],
@@ -2899,8 +2997,9 @@ setInterval(() => {
   }
 }, 30_000);
 
-// start: the page in the hash, else Home (the app opens on New Request)
-if (!HASH_RE.test(location.hash)) history.replaceState(null, '', '#/home');
+// start: the page in the hash (a reload), else the page shown last (the app's LastPage), else Home
+if (!HASH_RE.test(location.hash)) history.replaceState(null, '', hashFor(Restore.startPage(savedPage())));
+restoreWait = { pending: parseHash(location.hash).name === 'session', until: null };
 show(parseHash(location.hash));
 render();
 connectState();

@@ -2,8 +2,10 @@
 // a device the user named ("用家里的电脑", "on the mini") into the decision's "device"; the rules
 // here pick the computer, so the choice is testable and predictable:
 //   1. the user named a device -> that one (this Mac too, by its name in the Devices list);
+//   1b. the router judged that the work needs the computer that sent the request (its files, config,
+//      apps, hardware or background; the model decides, decision "needs_sender") -> this Mac;
 //   2. the project is on only one device (heartbeat projects, matched by git remote) -> that one;
-//   3. this Mac, unless it is busy; then the helper that is online, on AC power, has the agent,
+//   3. portable work: this Mac, unless it is busy; then the helper that is online, on AC power, has the agent,
 //      and runs the fewest sessions.
 // A device that is offline, is not a helper, or lacks the agent is never chosen. The device list
 // is the brain's GET /api/devices with the heartbeat fields (brain/heartbeat.py).
@@ -118,11 +120,15 @@ export interface PickInput {
   local: string;
   /** this Mac is busy (localBusy) */
   busy: boolean;
+  /** the router judged that the work needs this Mac, the computer that sent the request */
+  needsSender: boolean;
+  /** the router's short why for needsSender ('' = none) */
+  senderWhy?: string;
   /** the agent the session runs */
   agent: string;
   devices: readonly Device[];
 }
-type Rule = 'named' | 'project' | 'local' | 'idle' | 'busy';
+type Rule = 'named' | 'sender' | 'project' | 'local' | 'idle' | 'busy';
 export interface Pick {
   /** '' = this Mac */
   device: string;
@@ -177,8 +183,11 @@ export function pickDevice(i: PickInput): Pick {
     // THIS_MAC when it has none. No list of words: the model decides, the code compares the exact name.
     const self = i.local || THIS_MAC;
     const name = findNamed(i.named, [self, ...remotes.map((d) => d.name)]);
-    if (name === self) return { device: '', rule: 'named', note: 'You asked for this Mac.' };
-    const d = name === null ? undefined : remotes.find((x) => x.name === name);
+    // this Mac's name together with "needs the sender": the router filled device from its own judgement,
+    // so the sender rule below says why (not "You asked", which the user may not have said)
+    if (name === self && !(i.needsSender && i.folderHere))
+      return { device: '', rule: 'named', note: 'You asked for this Mac.' };
+    const d = name === null || name === self ? undefined : remotes.find((x) => x.name === name);
     if (d) {
       const why = unfit(d, i.agent);
       // the project is only on that helper: the router may have filled "device" from the Devices list
@@ -188,7 +197,19 @@ export function pickDevice(i: PickInput): Pick {
         return { device: d.name, rule: 'project', note: `${path.basename(i.folder)} is only on ${d.name}.` };
       if (!why) return { device: d.name, rule: 'named', note: `You asked for ${d.name}.` };
       notes.push(`${d.name} ${why}.`);
-    } else notes.push(`No computer called "${i.named.trim()}".`);
+    } else if (name !== self) notes.push(`No computer called "${i.named.trim()}".`);
+  }
+  // 1b. the work needs the computer that sent the request (a folder on this Mac: a project that is
+  // only on a helper cannot start here, so the project rule decides). The note only when this Mac is busy:
+  // otherwise this Mac is the choice anyway, and the route's reason stays the router's
+  if (i.needsSender && i.folderHere && !i.busy) return { device: '', rule: 'sender', note: notes.join(' ') };
+  if (i.needsSender && i.folderHere) {
+    const why = (i.senderWhy ?? '')
+      .trim()
+      .slice(0, 200)
+      .replace(/[.。]+$/u, '');
+    const note = why ? `This request needs this Mac: ${why}.` : 'This request needs this Mac.';
+    return { device: '', rule: 'sender', note: [...notes, note].join(' ') };
   }
   // 2. the project is on only one computer
   const has = holders(i, remotes);
@@ -219,6 +240,16 @@ export function pickDevice(i: PickInput): Pick {
     };
   const none = isProject ? `no helper with ${project} is free` : 'no helper is free';
   return { device: '', rule: 'busy', note: [...notes, `This Mac is busy, but ${none}.`].join(' ') };
+}
+
+/** The router's judgement that the work needs this Mac (decision "needs_sender", "device_why"). */
+export interface Sender {
+  needs: boolean;
+  why: string;
+}
+/** A routing decision -> its Sender: only a real boolean true counts; the why is text, else ''. */
+export function senderOf(d: { needs_sender?: unknown; device_why?: unknown }): Sender {
+  return { needs: d.needs_sender === true, why: typeof d.device_why === 'string' ? d.device_why : '' };
 }
 
 /** This Mac's name in the router's Devices list when it has no device name. */
@@ -306,6 +337,9 @@ export function inputFor(o: {
   busy: boolean;
   agent: string;
   devices: readonly Device[];
+  /** the router's judgement (decision "needs_sender") */
+  needsSender?: boolean;
+  senderWhy?: string;
 }): PickInput {
   const remote = o.here ? o.remoteOf(o.folder) : null;
   // not on this Mac: a helper's project, with its remote from the brain's list
@@ -318,6 +352,8 @@ export function inputFor(o: {
     repo: remote !== null,
     local: o.local,
     busy: o.busy,
+    needsSender: o.needsSender === true,
+    senderWhy: o.senderWhy ?? '',
     agent: o.agent,
     devices: o.devices,
   };

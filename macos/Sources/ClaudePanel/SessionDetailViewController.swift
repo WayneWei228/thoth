@@ -306,7 +306,7 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
         pathLabel.stringValue = place + (s.branch.isEmpty ? "" : "  ·  ⎇ \(s.branch)")
         modeSwitch.isHidden = s.isRemote
         localOnly.forEach { $0.isHidden = s.isRemote }
-        closeBtn.isHidden = s.isRemote && !s.isPending   // a pending row on a helper: closing cancels it
+        closeBtn.isHidden = s.isOffline && !s.isPending   // a helper's session closes on the helper; a pending row: cancels it
         if s.isRemote && chat.isHidden { applyMode() }
         resumeBtn.isHidden = s.running || s.isOffline || s.isPending
         resumeBtn.title = s.sid.isEmpty ? "Start" : "Resume"

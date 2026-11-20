@@ -28,7 +28,7 @@ export function helperOf(win: string): string {
 export interface DetailView {
   chatOnly: boolean; // no Chat / Terminal switch, no terminal: a helper's session is Chat only
   localOnly: boolean; // Show in Finder and VS Code: only for this Mac's session
-  close: boolean; // this Mac's session, or a pending row on a helper (closing it cancels it)
+  close: boolean; // not for an offline helper (a pending row on a helper: closing it cancels it)
   rename: boolean; // a row still preparing cannot be renamed
   start: boolean;
   stop: boolean;
@@ -43,7 +43,7 @@ export function detailView(s: HelperSession, mode: 'chat' | 'terminal'): DetailV
   return {
     chatOnly: remote,
     localOnly: !remote,
-    close: !remote || pending,
+    close: !off || pending,
     rename: !pending,
     start: !s.running && !off && !pending,
     stop: s.state === 'working' && !off,

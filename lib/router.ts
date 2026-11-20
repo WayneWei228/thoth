@@ -19,6 +19,15 @@ const DECISION_PROPS = {
     description:
       'for handoff: the device the session is on (from the brain). For new: the computer the user named for the work (a name from Devices) (this Mac too, when the user names it), else empty',
   },
+  needs_sender: {
+    type: 'boolean',
+    description:
+      "for every decision (a send to a busy session also becomes a new session): true when the work needs the computer that sent the request (it cannot be done the same way on another computer); false when it can run on any of the user's computers",
+  },
+  device_why: {
+    type: 'string',
+    description: 'a few words for needs_sender, in the language of the request',
+  },
   sid: { type: 'string', description: 'for handoff: the session id from the brain (full or first 8 characters)' },
   folder: {
     type: 'string',
@@ -108,7 +117,8 @@ ${JSON.stringify(devices)}`
   const sender = devices.map((d) => d as { name?: unknown; this_mac?: unknown }).find((d) => d.this_mac === true)?.name;
   const deviceRule = devices.length
     ? `
-- device (for "new"): when the request names a computer for the work ("用家里的电脑", "在 mac-mini 上跑", "on the mini", "use my home computer"), set device to that computer's name from Devices (the closest one: "家里的电脑"/"home computer" is the helper whose name fits best, or the only helper). The request was sent from the computer "${String(sender)}" (this Mac, where the panel runs). When the request means the computer it was sent from ("这台电脑", "本地电脑", "on this Mac"), device is "${String(sender)}". Otherwise leave device empty: the panel picks the computer itself, never guess one. Take the computer words out of "task" like agent words. With device set, the reason names that computer and the project; it does not say whether the computer is online (the panel checks and adds that). folder stays this Mac's project folder (from the known project folders or the sessions) whenever the project is on this Mac, also when a helper has a copy; the panel moves the work. Only a project that is NOT on this Mac and is in a helper's projects: folder is that project's name exactly as Devices lists it (the panel finds its path).`
+- device (for "new"): when the request names a computer for the work ("用家里的电脑", "在 mac-mini 上跑", "on the mini", "use my home computer"), set device to that computer's name from Devices (the closest one: "家里的电脑"/"home computer" is the helper whose name fits best, or the only helper). The request was sent from the computer "${String(sender)}" (this Mac, where the panel runs). When the request means the computer it was sent from ("这台电脑", "本地电脑", "on this Mac"), device is "${String(sender)}". Otherwise leave device empty: the panel picks the computer itself, never guess one. Take the computer words out of "task" like agent words. With device set, the reason names that computer and the project; it does not say whether the computer is online (the panel checks and adds that). folder stays this Mac's project folder (from the known project folders or the sessions) whenever the project is on this Mac, also when a helper has a copy; the panel moves the work. Only a project that is NOT on this Mac and is in a helper's projects: folder is that project's name exactly as Devices lists it (the panel finds its path).
+- needs_sender (for every decision: "new", "ask" and "send", also each item of "tasks"; the panel starts a new session for "ask", and for "send" when that session is busy): decide the intent first, then the computer. Can this work be done the same way on another of the user's computers, or does it need the computer that sent the request ("${String(sender)}")? Each computer has its own user account, home folder, files, configuration, agent memory, installed apps, settings, running programs and hardware; another computer cannot see or change those of "${String(sender)}". needs_sender is true when the work reads, changes, inspects or runs on what is on "${String(sender)}" itself, or when its result must act on that computer, or when it depends on background from the sessions here (context_from) or on what the user did on this computer that a short written brief cannot fully carry. The panel writes such a brief from context_from for a new session on any computer: background that a brief can carry (the goal, decisions, which files to change) does not by itself make the work need "${String(sender)}". needs_sender is false when the work is self-contained: it needs only the request and a project that another computer also has (for example new code or text written from scratch, or a general question). Judge from the request, the sessions, context_from and Devices; do not guess from single words. device_why: a few words for that judgement. The panel starts portable work on a free computer when "${String(sender)}" is busy, and work that needs "${String(sender)}" there.`
     : '';
   const handoffRule = brain
     ? `
@@ -241,6 +251,8 @@ export interface Decision {
   context_from?: string[];
   agent?: string;
   task?: string;
+  needs_sender?: boolean;
+  device_why?: string;
   tasks?: unknown;
   [key: string]: unknown;
 }

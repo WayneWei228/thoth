@@ -246,15 +246,46 @@ final class Backend {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.start() }
     }
 
+    /// What the views show from a state message, as one string: a new message with the same key
+    /// changes nothing on screen (only the activity clock moved). Built from short typed parts: one
+    /// long interpolation made the Swift type checker slow (76 ms here; a timeout on a slower Mac).
+    static func changeKey(_ state: StateMessage) -> String {
+        let parts: [String] = [
+            state.sessions.map(sessionKey).joined(separator: "\n"),
+            (state.routes ?? []).map(routeKey).joined(separator: ","),
+            String(state.restoring == true),
+            (state.peers ?? []).map(peerKey).joined(separator: ","),
+            (state.joins ?? []).map(joinKey).joined(separator: ","),
+        ]
+        return parts.joined(separator: "#")
+    }
+
+    private static func sessionKey(_ s: Session) -> String {
+        let fetch: String = s.fetch.map { f in [f.id, f.state, f.step].joined(separator: "/") } ?? ""
+        let fields: [String] = [
+            s.id, s.name, s.state, s.last, s.question, String(s.options.count),
+            s.title ?? "", s.prompt ?? "", s.branch, s.device ?? "", String(s.isOffline), fetch,
+        ]
+        return fields.joined(separator: "|")
+    }
+
+    private static func routeKey(_ r: Route) -> String {
+        [r.id, r.status, r.target ?? ""].joined(separator: "|")
+    }
+
+    private static func peerKey(_ p: PeerInfo) -> String {
+        [p.device, String(p.online), p.update ?? "", p.error ?? ""].joined(separator: "|")
+    }
+
+    private static func joinKey(_ j: JoinRequest) -> String {
+        [j.id, j.name, j.os].joined(separator: "|")
+    }
+
     private func apply(_ state: StateMessage) {
         if !connected || serverNote != nil { serverNote = nil; lastKey = "" }
         connected = true
         // ignore updates that only move the activity clock
-        let key = state.sessions.map { "\($0.id)|\($0.name)|\($0.state)|\($0.last)|\($0.question)|\($0.options.count)|\($0.title ?? "")|\($0.prompt ?? "")|\($0.branch)|\($0.device ?? "")|\($0.isOffline)|\($0.fetch.map { "\($0.id)/\($0.state)/\($0.step)" } ?? "")" }
-            .joined(separator: "\n") + "#" + (state.routes ?? []).map { "\($0.id)|\($0.status)|\($0.target ?? "")" }.joined(separator: ",")
-            + "#\(state.restoring == true)"
-            + "#" + (state.peers ?? []).map { "\($0.device)|\($0.online)|\($0.update ?? "")|\($0.error ?? "")" }.joined(separator: ",")
-            + "#" + (state.joins ?? []).map { "\($0.id)|\($0.name)|\($0.os)" }.joined(separator: ",")
+        let key = Self.changeKey(state)
         let first = sessions.isEmpty && !state.sessions.isEmpty
         sessions = state.sessions
         restoring = state.restoring ?? false

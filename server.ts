@@ -214,8 +214,10 @@ async function createWindow({
     ...(mcp === 'brain' ? [['@mcp', 'brain'] as [string, string]] : []),
     ...(agent === 'codex' ? [['@agent', 'codex'] as [string, string]] : []),
   ];
+  const winEnv = wslWindowEnv();
   const out = await tmux([
     'new-window',
+    ...winEnv,
     '-d',
     '-P',
     '-F',
@@ -318,7 +320,20 @@ function ensureSession(): void {
   let home = ''; // the shell window tmux needs to create the session; closed once a saved window exists
   if (tmuxSync(['has-session', '-t', S]) === null) {
     restored = false;
-    const made = tmuxSync(['new-session', '-d', '-P', '-F', '#{window_id}', '-s', S, '-n', 'home', '-c', HOME]);
+    const made = tmuxSync([
+      'new-session',
+      ...wslWindowEnv(),
+      '-d',
+      '-P',
+      '-F',
+      '#{window_id}',
+      '-s',
+      S,
+      '-n',
+      'home',
+      '-c',
+      HOME,
+    ]);
     if (made === null) return; // no tmux: try at the next poll
     home = made.trim();
     fresh = true;
@@ -1558,6 +1573,36 @@ function heartbeatTarget(): Heartbeat.Target | null {
     test: Boolean(INST.test),
   });
 }
+/** WSL: let Windows programs run from this server, its tmux and the Claude sessions in it
+ * (WslHost.applyInteropFix: a systemd service has no WSL_INTEROP and no Windows PATH). Runs at start,
+ * before the power check and before tmux makes a session or a window, so a new Claude window gets a
+ * live socket. isWsl() here, not IS_WSL: ensureSession can run before that line. */
+function fixWslInterop(): void {
+  if (!isWsl()) return;
+  WslHost.applyInteropFix({
+    readdir: (dir) => fs.readdirSync(dir),
+    read: (file) => {
+      try {
+        return fs.readFileSync(file, 'utf8');
+      } catch {
+        return null;
+      }
+    },
+    exists: (file) => fs.existsSync(file),
+    env: process.env,
+    tmuxSet: (key, value) => {
+      tmuxSync(['set-environment', '-g', key, value]);
+    },
+  });
+}
+fixWslInterop();
+/** WSL: fix the values now, then `-e` arguments that give a new tmux window or session the server's
+ * current WSL_INTEROP and PATH (review of PR #190: tmux's global environment can be stale). */
+function wslWindowEnv(): string[] {
+  if (!isWsl()) return [];
+  fixWslInterop();
+  return WslHost.tmuxEnvArgs(process.env);
+}
 /** The output of a power command, null when it fails or runs too long. */
 function runPower(cmd: string, args: string[], timeout: number): Promise<string | null> {
   return new Promise((resolve) => {
@@ -1574,6 +1619,7 @@ async function onAcPower(): Promise<boolean | null> {
   if (!IS_WSL) return null;
   const now = Date.now();
   if (now - beat.winAc.at < WslHost.AC_EVERY_MS) return beat.winAc.onAc;
+  fixWslInterop();
   const [cmd, args] = WslHost.BATTERY_CMD;
   beat.winAc = { at: now, onAc: WslHost.onAcFromBattery(await runPower(cmd, args, WslHost.TIMEOUT_MS)) };
   return beat.winAc.onAc;
@@ -1760,6 +1806,7 @@ async function newWithBrief(
     patch: patchIn = {},
     agent = 'claude',
     named = '',
+    sender = { needs: false, why: '' },
     project = folder,
     ownApp = false,
   }: {
@@ -1771,13 +1818,15 @@ async function newWithBrief(
     agent?: string;
     /** the computer the user named (the router's "device") */
     named?: string;
+    /** the router judged that the work needs this Mac (decision "needs_sender", "device_why") */
+    sender?: DevicePick.Sender;
     /** the project folder the router chose (may be a helper's path that is not on this Mac) */
     project?: string;
     /** the request came from this Mac's own app or page (NewSessionPrefs.ownApp) */
     ownApp?: boolean;
   },
 ): Promise<void> {
-  const pick = chooseDevice(named, project, agent);
+  const pick = chooseDevice(named, project, agent, sender);
   const sessionName = taskName(name, text);
   await RemoteNew.startRouted({
     device: pick.device,
@@ -1825,7 +1874,7 @@ async function newWithBrief(
 
 /** The computer for a new session (lib/device_pick.ts): the user's named one, the only one with the
  * project, else this Mac unless it is busy. Only when the brain lists helpers. */
-function chooseDevice(named: string, project: string, agent: string): DevicePick.Pick {
+function chooseDevice(named: string, project: string, agent: string, sender: DevicePick.Sender): DevicePick.Pick {
   const local = snapshot.sessions.filter((x) => !Peer.isRemoteId(x.id));
   const cpus = os.cpus().length || 1;
   return DevicePick.pickDevice(
@@ -1838,6 +1887,8 @@ function chooseDevice(named: string, project: string, agent: string): DevicePick
       busy: DevicePick.localBusy(local.filter((x) => x.state === 'working').length, (os.loadavg()[0] ?? 0) / cpus),
       agent,
       devices: brainDevices,
+      needsSender: sender.needs,
+      senderWhy: sender.why,
     }),
   );
 }
@@ -1939,6 +1990,8 @@ async function runDecision(
   // the folder the router chose; a project only on a helper is not on this Mac (lib/device_pick.ts)
   let project = d.action === 'new' && has(d.folder) ? d.folder : '';
   const named = d.action === 'new' || d.action === 'send' || d.action === 'ask' ? (d.device ?? '') : '';
+  // intent first: the router judged whether the work needs this Mac (lib/device_pick.ts rule 1b)
+  const sender = DevicePick.senderOf(d);
   // "new" without a usable folder goes to the default folder
   if (d.action === 'new' && (!has(d.folder) || !fs.existsSync(d.folder))) d.folder = defaultFolder();
   if (d.action === 'new') {
@@ -1979,7 +2032,7 @@ async function runDecision(
       targetName: target ? target.name : '',
       device: d.device ?? '',
       sid: d.sid ?? '',
-      ...(d.action === 'new' ? deviceNote(chooseDevice(named, project, newAgent), d.reason) : {}),
+      ...(d.action === 'new' ? deviceNote(chooseDevice(named, project, newAgent, sender), d.reason) : {}),
     });
     return;
   }
@@ -2017,6 +2070,7 @@ async function runDecision(
       agent,
       sources: [target, ...contextFrom.filter((s) => s.id !== target.id)],
       named,
+      sender,
       ownApp: prefs.ownApp === true,
       patch: {
         ...base,
@@ -2044,6 +2098,7 @@ async function runDecision(
       agent: newAgent,
       sources: contextFrom,
       named,
+      sender,
       project,
       ownApp: prefs.ownApp === true,
       patch: { ...base, decided: 'auto-new', agent: newAgent },
@@ -2066,6 +2121,7 @@ async function runDecision(
       sources: contextFrom,
       agent,
       named,
+      sender,
       project: chosen ? folder : project || folder,
       ownApp: prefs.ownApp === true,
       patch: {
@@ -3205,6 +3261,10 @@ const actions: Record<string, Action> = {
     // web panel and remote client: base64 image or document -> a file in the attachments folder
     const { path: file } = Attachments.saveUpload(ATTACH_DIR, { name, data } as Attachments.Upload);
     return { path: file };
+  },
+  // web panel crash restore: the attached files of a saved draft that are still there
+  attachmentsExist({ paths }) {
+    return { paths: Attachments.existingAttachments(paths, ATTACH_DIR) };
   },
   async highlight({ code, lang }) {
     if (typeof code !== 'string' || code.length > 200000) throw new Error('Bad code');

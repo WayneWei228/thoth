@@ -129,16 +129,28 @@ export function attachmentPaths(attachments: unknown, { onlyIn = '' }: Attachmen
   if (list.length > 20) throw new Error('At most 20 attachments');
   const root = onlyIn ? path.resolve(onlyIn) : '';
   return list.map((p) => {
-    const ok =
-      typeof p === 'string' &&
-      path.isAbsolute(p) &&
-      ATTACH_EXT.test(p) &&
-      !/\s/.test(p) &&
-      (!root || (path.resolve(p) === p && path.dirname(p) === root && isFile(p))) &&
-      fs.existsSync(p);
-    if (!ok) throw new Error('Attachment not found');
+    if (!isAttachment(p, root)) throw new Error('Attachment not found');
     return p;
   });
+}
+
+function isAttachment(p: unknown, root: string): p is string {
+  return (
+    typeof p === 'string' &&
+    path.isAbsolute(p) &&
+    ATTACH_EXT.test(p) &&
+    !/\s/.test(p) &&
+    (!root || (path.resolve(p) === p && path.dirname(p) === root && isFile(p))) &&
+    fs.existsSync(p)
+  );
+}
+
+/** The files of a saved draft that can still be sent (in `dir`, still there): a crash restore drops the
+ * rest, as Composer.swift loadDraft drops files that no longer exist. At most 20 are checked. */
+export function existingAttachments(paths: unknown, dir: string): string[] {
+  if (!Array.isArray(paths)) return [];
+  const root = path.resolve(dir);
+  return (paths as unknown[]).slice(0, 20).filter((p): p is string => isAttachment(p, root));
 }
 
 /** The message text with the attachment paths after it. */

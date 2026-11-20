@@ -23,6 +23,13 @@ export const POWERSHELL = 'powershell.exe';
 export const SCHTASKS = 'schtasks.exe';
 export const WSLPATH = 'wslpath';
 export const TASK = 'ThothWSL';
+/** The name the task's program runs under in WSL (`exec -a`): a `sleep infinity` that only the task
+ * starts, so pgrep finds the task's process and not another sleep (review of PR #191). */
+export const KEEPALIVE = 'thoth-keepalive';
+/** What the task runs in WSL to keep it open: a process that never ends, named KEEPALIVE. */
+export const TASK_PROGRAM = `/bin/bash -c "exec -a ${KEEPALIVE} /bin/sleep infinity"`;
+/** That process's command line as pgrep -f sees it. */
+export const KEEPALIVE_CMDLINE = `${KEEPALIVE} infinity`;
 const STATE_FILE = 'always-on.json';
 
 export type Key = 'STANDBYIDLE' | 'HIBERNATEIDLE' | 'LIDACTION';
@@ -287,7 +294,7 @@ export function taskCommand(distro: string, account: string): string {
   const user = psQuote(account);
   const register = `Register-ScheduledTask -TaskName '${TASK}' -Action $a -Trigger $t`;
   return [
-    `$a = New-ScheduledTaskAction -Execute 'wsl.exe' -Argument ${psQuote(`-d ${distro} --exec /bin/sleep infinity`)}`,
+    `$a = New-ScheduledTaskAction -Execute 'wsl.exe' -Argument ${psQuote(`-d ${distro} --exec ${TASK_PROGRAM}`)}`,
     '$t = New-ScheduledTaskTrigger -AtStartup',
     `$p = New-ScheduledTaskPrincipal -UserId ${user} -LogonType S4U`,
     '$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden',
@@ -297,6 +304,8 @@ export function taskCommand(distro: string, account: string): string {
       `$c = Get-Credential -UserName ${user} -Message ${psQuote(`Windows password of ${account}: the task ${TASK} starts WSL as this user at boot`)}; ` +
       `if (-not $c) { throw '${TASK} was not created: no password was given' }; ` +
       `${register} -Settings $s -User $c.UserName -Password $c.GetNetworkCredential().Password -Force | Out-Null }`,
+    // start it now too: until it runs, WSL stops when its last window closes (until Windows restarts)
+    START_TASK,
   ].join('; ');
 }
 
@@ -304,6 +313,16 @@ export function taskCommand(distro: string, account: string): string {
  * about 40 s for CIM before they fail (Windows Server 2025, 2026-11-20); this check takes 0.2 s. */
 export const ADMIN_ONLY =
   'if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 5 }; ';
+
+/** Start the task now (an administrator command: schtasks /run may be refused for a standard user). */
+const START_TASK = `Start-ScheduledTask -TaskName '${TASK}'`;
+
+/** The task's WSL session runs: its program is a process in this distro. Read in WSL, not from
+ * Windows (the task cmdlets wait 40 s without administrator rights; schtasks' status is in the
+ * Windows language). */
+export function taskRunning(d: Deps): boolean {
+  return d.run('pgrep', ['-x', '-f', KEEPALIVE_CMDLINE]).code === 0;
+}
 
 export function taskExists(d: Deps): boolean {
   return d.run(SCHTASKS, ['/query', '/tn', TASK]).code === 0;
@@ -440,12 +459,25 @@ export function enableWsl(d: Deps): void {
     fs.writeFileSync(cfgFile, setIdle(cfgText ?? '', '-1'));
     d.log('   .wslconfig: changed. It counts from the next start of WSL (after a Windows restart).');
   }
+  let task = taskNow;
   if (taskNow) d.log(`   task ${TASK}: already there.`);
   else {
     const cmd = taskCommand(distro, user.account);
-    const r = d.run(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', `${ADMIN_ONLY}${cmd}`]);
-    if (r.code === 0 && taskExists(d)) d.log(`   task ${TASK}: created.`);
-    else admin.push(cmd);
+    d.run(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', `${ADMIN_ONLY}${cmd}`]);
+    // decided by the task, not the exit code: when only the start at its end failed, the task is
+    // there and only Start-ScheduledTask goes to the administrator (below)
+    task = taskExists(d);
+    if (task) d.log(`   task ${TASK}: created.`);
+    else admin.push(cmd); // it also starts the task
+  }
+  // the task must run now, not only after the next Windows restart: WSL stops when its last window
+  // closes (found on a real Windows Server 2025 helper: offline until a restart)
+  if (task) {
+    if (taskRunning(d)) d.log(`   task ${TASK}: running, so WSL stays on when this window closes.`);
+    else if (d.run(SCHTASKS, ['/run', '/tn', TASK]).code === 0)
+      // Windows took the request; whether the program came up is not known yet (no waiting here)
+      d.log(`   task ${TASK}: start requested. To see that it runs: thoth always-on --status`);
+    else admin.push(START_TASK);
   }
   if (admin.length > 0) throw adminError(admin, 'thoth always-on');
   const after = readWinPower(d, scheme ?? 'SCHEME_CURRENT');
@@ -487,8 +519,12 @@ export function undoWsl(d: Deps): void {
     d.log('.wslconfig: vmIdleTimeout is back to what it was.');
   }
   if (!saved.taskBefore && taskExists(d)) {
-    if (d.run(SCHTASKS, ['/delete', '/tn', TASK, '/f']).code === 0) d.log(`Task ${TASK} removed.`);
-    else admin.push(`Unregister-ScheduledTask -TaskName '${TASK}' -Confirm:$false`);
+    if (d.run(SCHTASKS, ['/delete', '/tn', TASK, '/f']).code === 0) {
+      d.log(`Task ${TASK} removed.`);
+      // removing a task does not stop its running copy: end the keepalive here, so WSL can stop
+      // again when its last window closes (review round 2 of PR #191)
+      if (d.run('pkill', ['-x', '-f', KEEPALIVE_CMDLINE]).code === 0) d.log(`Its process ${KEEPALIVE} is stopped.`);
+    } else admin.push(`Unregister-ScheduledTask -TaskName '${TASK}' -Confirm:$false`);
   }
   if (admin.length > 0) throw adminError(admin, 'thoth always-on --undo');
   const left = powerRestore(readWinPower(d, scheme), saved.power);
@@ -537,6 +573,14 @@ function items(d: Deps): DoctorRow[] {
   row(idle === '-1', `${cfg}: vmIdleTimeout ${idle ?? 'not set'} (-1 = WSL never stops when idle)`);
   const task = taskExists(d);
   row(task, `task ${TASK} (starts WSL at boot): ${task ? 'there' : 'missing'}`);
+  if (task) {
+    // one row for one cause: a missing task is already the row above
+    const running = taskRunning(d);
+    row(
+      running,
+      `task ${TASK} keeps WSL running: ${running ? 'yes' : 'no (WSL stops when its last window closes, until Windows restarts)'}`,
+    );
+  }
   const services = servicesInstalled(d);
   row(services, `services: ${services ? 'installed' : 'not installed'}`);
   return rows;

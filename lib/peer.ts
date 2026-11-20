@@ -160,8 +160,10 @@ export function parseRemoteId(s: unknown): { device: string; id: string } | null
 }
 export const isRemoteId = (s: unknown): boolean => typeof s === 'string' && s.startsWith('r:');
 
-/** Actions the main panel passes to a helper's session (the ones a remote client may use, A4). */
-export const ACTIONS = new Set(['send', 'choose', 'interrupt', 'start', 'rename']);
+/** Actions the main panel passes to a helper's session (the ones a remote client may use, A4).
+ * `queue`: a remote client's reply (typed when the session is ready, PanelClient.replyAction). Close
+ * closes it on the helper, as there: the conversation is kept and can be resumed. */
+export const ACTIONS = new Set(['send', 'queue', 'choose', 'interrupt', 'start', 'rename', 'close']);
 /** GET paths the main panel passes on for a helper's session (`win` = the session): the chat, its
  * images and tool results, and the files Claude sent (previews; checked by the helper against that
  * session's transcript). */

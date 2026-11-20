@@ -388,12 +388,16 @@ enum SessionMenu {
         }
         add("Rename…", rename)
         if s.isRemote {
-            // a helper computer's session (lib/peer.ts ACTIONS): no folder on this Mac, no close yet
+            // a helper computer's session (lib/peer.ts ACTIONS): no folder on this Mac; it closes on the helper
             if !s.running { add(s.sid.isEmpty ? "Start" : "Resume") { Backend.shared.post("start", ["id": s.id]) } }
             if s.sessionState == .working { add("Stop (Esc)") { Backend.shared.post("interrupt", ["id": s.id]) } }
             if s.canFetch {
                 m.addItem(.separator())
                 add(s.isFetching ? "Cancel Fetch" : "Fetch Result") { fetch(s) }
+            }
+            if !s.isOffline {
+                m.addItem(.separator())
+                add("Close Session") { close(s) }
             }
             return m
         }
