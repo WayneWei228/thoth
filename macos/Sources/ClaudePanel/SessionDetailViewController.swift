@@ -15,6 +15,8 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
     private let pathLabel = label("", size: 12, color: .secondaryLabelColor)
     private var resumeBtn: ActionButton!
     private var stopBtn: ActionButton!
+    /// Only for a session on this Mac (a helper computer's folder is not here; it closes from there).
+    private var localOnly: [NSView] = []
     private let choiceBar = NSView()
     private let choiceQ = label("", size: 13, weight: .semibold, lines: 2)
     /// Claude's menu as a numbered list, one option per row (like the terminal menu).
@@ -81,6 +83,7 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
             if let s = self?.current { SessionMenu.close(s) }
         }
         close.toolTip = "Close session"
+        localOnly = [finder, code, close]
         resumeBtn.setAccessibilityIdentifier("detail.resume")
         stopBtn.setAccessibilityIdentifier("detail.stop")
         finder.setAccessibilityIdentifier("detail.finder")
@@ -224,7 +227,8 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
         if sessionId != id { choiceKey = "" }
         sessionId = id
         attachTerminal()
-        TerminalHost.shared.show(id)
+        // a helper computer's session has no terminal on this Mac: only Chat (lib/peer.ts)
+        if current?.isRemote != true { TerminalHost.shared.show(id) }
         composer.draftKey = Self.draftKey(id)
         if chatWin != id {
             chatWin = id
@@ -244,8 +248,11 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
 
     private static func placeholder(_ agent: String) -> String { "Message \(agent)…  (paste or drop images and files)" }
 
+    /// Chat, or the terminal. A helper computer's session is always Chat (no terminal through the relay).
+    private var chatMode: Bool { modeSwitch.selectedSegment == 0 || current?.isRemote == true }
+
     private func applyMode() {
-        let chatMode = modeSwitch.selectedSegment == 0
+        let chatMode = self.chatMode
         chat.isHidden = !chatMode
         TerminalHost.shared.view.isHidden = chatMode
         termHolder.layer?.backgroundColor = chatMode ? NSColor.clear.cgColor : Theme.terminalBG.cgColor
@@ -257,7 +264,7 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
     /// Composer only in Chat mode and only while Claude runs; otherwise the page content
     /// reaches the bottom of the window.
     private func updateComposer() {
-        let show = modeSwitch.selectedSegment == 0 && (current?.running ?? false)
+        let show = chatMode && (current?.running ?? false) && current?.isOffline != true
         composer.isHidden = !show
         // deactivate first: both active at once would conflict
         if show { toBottom.isActive = false; aboveComposer.isActive = true } else { aboveComposer.isActive = false; toBottom.isActive = true }
@@ -286,15 +293,19 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
         let ph = Self.placeholder(s.isCodex ? "Codex" : "Claude")
         if composer.text.placeholder != ph { composer.text.placeholder = ph }
         titleLabel.stringValue = s.title ?? ""
-        pathLabel.stringValue = shortPath(s.folder) + (s.branch.isEmpty ? "" : "  ·  ⎇ \(s.branch)")
-        resumeBtn.isHidden = s.running
+        let place = s.device.map { "on \($0)  ·  \(s.folder)" } ?? shortPath(s.folder)
+        pathLabel.stringValue = place + (s.branch.isEmpty ? "" : "  ·  ⎇ \(s.branch)")
+        modeSwitch.isHidden = s.isRemote
+        localOnly.forEach { $0.isHidden = s.isRemote }
+        if s.isRemote && chat.isHidden { applyMode() }
+        resumeBtn.isHidden = s.running || s.isOffline
         resumeBtn.title = s.sid.isEmpty ? "Start" : "Resume"
-        stopBtn.isHidden = s.sessionState != .working
+        stopBtn.isHidden = s.sessionState != .working || s.isOffline
         updateComposer()
 
         // choice bar: Claude's menu as buttons
         let key = s.sessionState == .needs ? s.options.map(\.label).joined(separator: "|") : ""
-        choiceBar.isHidden = key.isEmpty || modeSwitch.selectedSegment != 0
+        choiceBar.isHidden = key.isEmpty || !chatMode || s.isOffline
         if key != choiceKey {
             choiceKey = key
             choiceQ.stringValue = s.question.isEmpty ? "\(s.isCodex ? "Codex" : "Claude") needs your decision" : s.question
@@ -317,6 +328,11 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
             }
         }
 
+        if s.isOffline, let d = s.device {
+            noticeLabel.stringValue = "\(d) does not answer now (asleep, off, or no network). This is the last state it sent. Thoth connects again by itself."
+            notice.isHidden = false
+            return
+        }
         switch s.sessionState {
         case .elsewhere:
             noticeLabel.stringValue = "This conversation is open in another window (VS Code or a terminal). Click Resume to move it here: the other copy is closed and the conversation continues in the panel. A message sent here does the same."
@@ -401,6 +417,9 @@ final class ChatBridge: NSObject, WKScriptMessageHandler {
             // file rules (/api/file check=1) and gives back the real path and whether it may be opened.
             // A type that can run code (HTML, SVG, scripts, Office) is shown in Finder, not opened.
             guard let win = body["win"] as? String, let p = body["path"] as? String else { return }
+            // a helper computer's session (lib/peer.ts): the file is on that computer; a path it names is
+            // never opened on this Mac
+            if let s = Backend.shared.session(win), let d = s.device { Toast.show("This file is on \(d)"); return }
             struct Checked: Decodable { let path: String; let open: Bool }
             Backend.shared.get("api/file", query: ["win": win, "path": p, "check": "1"], as: Checked.self) { r in
                 guard let r else { Toast.show("Could not open the file"); return }

@@ -2,6 +2,7 @@
 // code (15 min, single use; only its hash is stored) and gets its own token (only its hash is
 // stored). The brain's device listener accepts nothing but join and push.
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import os from 'node:os';
 
 import * as Remote from './remote.ts';
@@ -418,4 +419,13 @@ export function hostName(host: string = os.hostname()): string {
 /** Network error code (ECONNREFUSED, CERT_HAS_EXPIRED, ...) -> connectError kind. */
 export function errorKind(code: unknown): 'certificate' | 'unreachable' {
   return CERT_CODES.test(truthy(code) ? String(code) : '') ? 'certificate' : 'unreachable';
+}
+
+/** A JSON file, or null when it is missing or not JSON. */
+export function readJson(file: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
 }

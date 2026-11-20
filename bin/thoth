@@ -8,6 +8,11 @@
 #   thoth tui      plain tmux view (fallback)
 #   thoth services install|uninstall|status   keep server + brain running after logout/reboot
 #   thoth doctor [--fix]   explain common faults with the exact fix; --fix repairs what is safe
+#   thoth doctor --json    machine-readable checks: installed, role, owner (main), joined, claude, claude_login, brain
+#   thoth setup --role main|helper [--connect <ccbrain://link>] [--join <code>] [--hub <cloud brain>] [--name <name>] [--wait <s>]
+#                  no questions asked: set this computer's role and join the cloud brain (safe to run again;
+#                  main needs the owner connection (--connect); exit 6: waiting for Approve, run it again after that)
+#   thoth always-on [--lid] [--undo] [--status]   keep this Mac on as a helper (services, no sleep on AC)
 #   thoth adopt    move the Claude Code or Codex session of this terminal into the panel
 #                     (Claude: the /panel command; Codex: type !thoth adopt; or: thoth adopt <session-id>)
 set -u
@@ -19,10 +24,12 @@ LOG="$STATE/server.log"
 SCHEME="${CC_PANEL_URL_SCHEME:-claudepanel}"
 TMUX_ARGS=(); [ -n "${CC_PANEL_TMUX_SOCKET:-}" ] && TMUX_ARGS=(-L "$CC_PANEL_TMUX_SOCKET")
 export PATH="$HOME/.local/share/claude-panel/node/bin:$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/local/bin:$PATH"
-NODE="$(command -v node)"   # the installer's private Node 22 comes first (scripts/install.sh)
+NODE="${CC_PANEL_NODE:-$(command -v node)}"   # the installer's private Node 22 comes first (scripts/install.sh); CC_PANEL_NODE: tests
 mkdir -p "$(dirname "$LOG")"
 
 up() { curl -s -o /dev/null --max-time 1 "$URL/api/state"; }
+# Node 22.18+ (runs the TypeScript files directly)
+node_ok() { [ -n "$NODE" ] && [ -x "$NODE" ] && "$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=18)?0:1)' 2>/dev/null; }
 SERVICES="$APP_DIR/scripts/services.sh"
 # true when `thoth services install` was run: then systemd/launchd owns the server
 managed() { [ -x "$SERVICES" ] && "$SERVICES" installed >/dev/null 2>&1; }
@@ -155,12 +162,22 @@ case "${1:-open}" in
     else stop_server; sleep 0.5; start_server; fi
     echo "Server restarted." ;;
   services) shift; exec "$SERVICES" "${1:-status}" "${@:2}" ;;
-  doctor) shift; exec "$SERVICES" doctor "$@" ;;
+  doctor) shift
+    if [ "${1:-}" = --json ]; then
+      # the checks are TypeScript: without Node 22.18 they cannot run, so say that in the same JSON shape
+      node_ok || { printf '%s\n' '{"ok":false,"role":"","device":"","hub":"","checks":[{"id":"installed","ok":false,"detail":"Node.js 22.18+ not found","fix":"run the one-line install command from the Thoth website again (curl ... install.sh | bash)"}]}'; exit 1; }
+      exec "$NODE" "$APP_DIR/scripts/thoth_setup.ts" doctor-json
+    fi
+    exec "$SERVICES" doctor "$@" ;;
+  setup) shift
+    node_ok || { echo "thoth setup: Node.js 22.18+ not found. Run the one-line install command from the Thoth website again."; exit 1; }
+    exec "$NODE" "$APP_DIR/scripts/thoth_setup.ts" setup "$@" ;;
+  always-on) shift; exec "$NODE" "$APP_DIR/scripts/always-on.ts" "$@" ;;
   status)
     up && echo "server: running on $URL" || echo "server: stopped"
     tmux ${TMUX_ARGS[@]+"${TMUX_ARGS[@]}"} list-windows -t cc -F '  #{window_name}: #{pane_current_command} in #{pane_current_path}' 2>/dev/null || echo "  no tmux session"
     ;;
   tui) exec tmux ${TMUX_ARGS[@]+"${TMUX_ARGS[@]}"} attach -t cc ;;
   adopt) shift; adopt "${1:-}" ;;
-  *) sed -n '2,12p' "$0"; exit 1 ;;
+  *) sed -n '2,17p' "$0"; exit 1 ;;
 esac

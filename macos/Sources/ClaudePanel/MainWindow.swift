@@ -156,6 +156,7 @@ private enum SideRow {
     case nav(Page, String, String)        // page, title, SF Symbol
     case header(String)
     case session(Session)
+    case device(String, Bool)             // a helper computer's name, offline (lib/peer.ts)
 }
 
 final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
@@ -336,7 +337,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     @objc private func checkAll() {
-        let ids = Set(Backend.shared.sessions.map(\.id))
+        let ids = Set(Backend.shared.sessions.filter { !$0.isRemote }.map(\.id))   // a helper's session cannot be closed from here yet
         checked = checked == ids ? [] : ids
         aiTicked = []   // the user's choice now
         reload()
@@ -356,7 +357,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         barLabel.stringValue = n == 0 ? (hints.isEmpty ? "Tick sessions to close" : "AI: nothing to close") : "\(n) selected"
         closeBtn.title = n == 0 ? "Close" : "Close \(n)"
         closeBtn.isEnabled = n > 0
-        allBtn.title = checked.count == Backend.shared.sessions.count && n > 0 ? "None" : "All"
+        allBtn.title = checked.count == Backend.shared.sessions.filter({ !$0.isRemote }).count && n > 0 ? "None" : "All"
     }
 
     func reload() {
@@ -367,7 +368,9 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         // interrupts a turn the AI judged on an older snapshot (the check box hides the status dot)
         // (only the AI's ticks: a session the user ticks by hand stays ticked)
         for x in sessions where aiTicked.contains(x.id) && (x.sessionState == .working || x.sessionState == .needs) { checked.remove(x.id); aiTicked.remove(x.id) }
-        let needs = sessions.filter { $0.sessionState == .needs }
+        // this Mac's sessions under Needs You / Recent; each helper computer's under its own name
+        let local = sessions.filter { !$0.isRemote }
+        let needs = local.filter { $0.sessionState == .needs }
         var r: [SideRow] = [
             .nav(.home, "New Request", "square.and.pencil"),
             .nav(.sessions, "All Sessions", "square.grid.2x2"),
@@ -383,11 +386,18 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             else if lastState[s.id] == .working && state != .working { orderKey[s.id] = Date().timeIntervalSince1970 * 1000 }
             lastState[s.id] = state
         }
-        let rest = sessions.filter { $0.sessionState != .needs }
+        let rest = local.filter { $0.sessionState != .needs }
             .sorted { (orderKey[$0.id] ?? 0, $0.id) > (orderKey[$1.id] ?? 0, $1.id) }
         if !rest.isEmpty {
             r.append(.header("Recent"))
             r += rest.map { .session($0) }
+        }
+        var devices: [String] = []
+        for s in sessions { if let d = s.device, !devices.contains(d) { devices.append(d) } }
+        for d in devices.sorted() {
+            let items = sessions.filter { $0.device == d }
+            r.append(.device(d, items.allSatisfy(\.isOffline)))
+            r += items.sorted { ($0.sessionState.rank, -(orderKey[$0.id] ?? 0), $0.id) < ($1.sessionState.rank, -(orderKey[$1.id] ?? 0), $1.id) }.map { .session($0) }
         }
         rows = r
         if isViewLoaded { updateBar() }
@@ -416,13 +426,15 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
-        if case .header = rows[row] { return true }
-        return false
+        switch rows[row] {
+        case .header, .device: return true
+        default: return false
+        }
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         switch rows[row] {
-        case .header: return 26
+        case .header, .device: return 26
         case .nav: return 30
         case .session(let s): return (s.title?.isEmpty == false || (selecting && hints[s.id] != nil)) ? 44 : 30
         }
@@ -430,6 +442,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         if case .header = rows[row] { return false }
+        if case .device = rows[row] { return false }
         // select mode: no row can be selected. A mouse click ticks through rowClicked; with VoiceOver the
         // row's check box (a button) ticks; arrow keys do nothing, drags tick nothing.
         if selecting { return false }
@@ -445,6 +458,9 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             // Table rows do not expose identifiers; a fixed label lets agents find them.
             v?.setAccessibilityLabel("\(s.name), \(s.sessionState.label)")
         case .header(let t): v?.setAccessibilityIdentifier("header.\(t)")
+        case .device(let device, let off):
+            v?.setAccessibilityIdentifier("sidebar.device.\(device)")
+            v?.setAccessibilityLabel(off ? "\(device), offline" : device)
         }
         return v
     }
@@ -482,6 +498,19 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
                                              tb.trailingAnchor.constraint(equalTo: b.leadingAnchor, constant: -10), tb.firstBaselineAnchor.constraint(equalTo: l.firstBaselineAnchor)])
             }
             return v
+        case .device(let d, let off):
+            // a helper computer: its name; grey with "offline" when it does not answer
+            let img = NSImageView(image: Theme.icon("desktopcomputer", d)!)
+            img.contentTintColor = off ? .tertiaryLabelColor : .secondaryLabelColor
+            img.translatesAutoresizingMaskIntoConstraints = false
+            let l = label(off ? "\(d) · offline" : d, size: 11, weight: .semibold, color: .tertiaryLabelColor)
+            let v = NSView(); v.addSubview(img); v.addSubview(l)
+            NSLayoutConstraint.activate([
+                img.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8), img.centerYAnchor.constraint(equalTo: l.centerYAnchor),
+                img.widthAnchor.constraint(equalToConstant: 13), img.heightAnchor.constraint(equalToConstant: 13),
+                l.leadingAnchor.constraint(equalTo: img.trailingAnchor, constant: 5), l.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -4),
+            ])
+            return v
         case .nav(_, let title, let symbol):
             let v = NSTableCellView()
             let img = NSImageView(image: Theme.icon(symbol, title)!)
@@ -499,7 +528,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         case .session(let s):
             let v = NSTableCellView()
             let dot: NSView
-            if selecting {
+            if selecting && !s.isRemote {
                 let cb = NSButton(checkboxWithTitle: "", target: self, action: #selector(checkBox(_:)))
                 cb.state = checked.contains(s.id) ? .on : .off
                 cb.identifier = NSUserInterfaceItemIdentifier(s.id)
@@ -544,7 +573,9 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
                 cons += [name.centerYAnchor.constraint(equalTo: v.centerYAnchor), dot.centerYAnchor.constraint(equalTo: v.centerYAnchor)]
             }
             NSLayoutConstraint.activate(cons)
-            v.toolTip = shortPath(s.folder)
+            v.toolTip = s.device.map { "\($0): \(s.folder)" } ?? shortPath(s.folder)
+            // a helper computer that does not answer: its sessions grey
+            if s.isOffline { v.alphaValue = 0.45 }
             return v
         }
     }
@@ -555,6 +586,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         case .nav(let p, _, _): rv.setAccessibilityIdentifier(navID(p))
         case .session(let s): rv.setAccessibilityIdentifier("session.\(s.name)")
         case .header(let t): rv.setAccessibilityIdentifier("header.\(t)")
+        case .device(let device, _): rv.setAccessibilityIdentifier("sidebar.device.\(device)")
         }
         return rv
     }
@@ -562,7 +594,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     /// Select mode: a click on a session row (also the open session's) ticks or unticks it.
     @objc private func rowClicked() {
         let row = table.clickedRow
-        guard selecting, row >= 0, row < rows.count, case .session(let s) = rows[row] else { return }
+        guard selecting, row >= 0, row < rows.count, case .session(let s) = rows[row], !s.isRemote else { return }
         toggle(s.id)
     }
 
@@ -572,7 +604,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         switch rows[table.selectedRow] {
         case .nav(let p, _, _): selectedPage = p; onSelect?(p)
         case .session(let s): selectedPage = .session(s.id); onSelect?(.session(s.id))
-        case .header: break
+        case .header, .device: break
         }
     }
 }

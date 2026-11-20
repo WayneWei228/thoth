@@ -382,6 +382,12 @@ enum SessionMenu {
         }
         add("Open", open)
         add("Rename…", rename)
+        if s.isRemote {
+            // a helper computer's session (lib/peer.ts ACTIONS): no folder on this Mac, no close yet
+            if !s.running { add(s.sid.isEmpty ? "Start" : "Resume") { Backend.shared.post("start", ["id": s.id]) } }
+            if s.sessionState == .working { add("Stop (Esc)") { Backend.shared.post("interrupt", ["id": s.id]) } }
+            return m
+        }
         if !s.running { add(s.sid.isEmpty ? "Start" : "Resume") { Backend.shared.post("start", ["id": s.id]) } }
         if s.sessionState == .working { add("Stop (Esc)") { Backend.shared.post("interrupt", ["id": s.id]) } }
         m.addItem(.separator())

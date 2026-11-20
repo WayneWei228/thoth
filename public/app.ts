@@ -11,6 +11,7 @@ interface Session {
   id: string;
   name: string;
   folder: string;
+  device?: string; // a helper computer's session (lib/peer.ts)
   state: string;
   agent?: string;
   title?: string;
@@ -2133,12 +2134,17 @@ function showMenu(x: number, y: number, s: Session): void {
     ],
     !s.running && [has(s.sid) ? 'Resume' : 'Start', run(() => api('start', { id: s.id }))],
     s.state === 'working' && ['Stop (Esc)', run(() => api('interrupt', { id: s.id }))],
-    '-',
-    ['New Session in This Folder', run(() => openNew(s.folder))],
-    ['Show in Finder', run(() => api('reveal', { folder: s.folder }))],
-    ['Open in VS Code', run(() => api('reveal', { folder: s.folder, app: 'code' }))],
-    '-',
-    ['Close Session', () => void closeSession(s)],
+    // a helper computer's session (lib/peer.ts): its folder is on that computer; it closes there
+    ...(has(s.device)
+      ? []
+      : ([
+          '-',
+          ['New Session in This Folder', run(() => openNew(s.folder))],
+          ['Show in Finder', run(() => api('reveal', { folder: s.folder }))],
+          ['Open in VS Code', run(() => api('reveal', { folder: s.folder, app: 'code' }))],
+          '-',
+          ['Close Session', () => void closeSession(s)],
+        ] as (MenuItem | '-')[])),
   ]);
 }
 // a context menu at x, y: items are [label, fn], '-' (a separator) or false (left out)

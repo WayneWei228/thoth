@@ -158,7 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         for s in Backend.shared.sessions {
             let prev = prevStates[s.id]
             prevStates[s.id] = s.state
-            guard let prev, prev != s.state else { continue }
+            guard let prev, prev != s.state, !s.isOffline else { continue }
             if s.sessionState == .needs { post("\(s.name) needs you", s.question.isEmpty ? "Claude is waiting for your choice." : s.question, id: s.id) }
             if prev == "working" && s.sessionState == .idle { post("\(s.name) is done", s.last, id: s.id) }
         }

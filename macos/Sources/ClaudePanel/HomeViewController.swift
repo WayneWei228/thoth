@@ -108,7 +108,7 @@ final class HomeViewController: NSViewController {
 
         // Needs you
         needsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let needs = b.sessions.filter { $0.sessionState == .needs }
+        let needs = b.sessions.filter { $0.sessionState == .needs && !$0.isOffline }   // an offline helper cannot answer
         needsHeader.isHidden = needs.isEmpty
         needsStack.isHidden = needs.isEmpty
         for s in needs { needsStack.addArrangedSubview(needsRow(s)) }

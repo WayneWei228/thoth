@@ -67,7 +67,7 @@ final class SessionsViewController: NSViewController {
         let sessions = Backend.shared.sessions.filter {
             f.isEmpty || "\($0.name) \($0.folder) \($0.title ?? "") \($0.last)".lowercased().contains(f)
         }
-        let key = sessions.map { "\($0.id)\($0.agentId)\($0.name)\($0.state)\($0.last)\($0.title ?? "")\($0.prompt ?? "")" }.joined() + f
+        let key = sessions.map { "\($0.id)\($0.agentId)\($0.name)\($0.state)\($0.last)\($0.title ?? "")\($0.prompt ?? "")\($0.isOffline)" }.joined() + f
         if key == lastKey { return }
         lastKey = key
 
@@ -77,21 +77,22 @@ final class SessionsViewController: NSViewController {
             stack.addArrangedSubview(empty)
             return
         }
-        // group by folder; groups with sessions that need the user come first
+        // group by folder (a helper computer's folder is its own group: same path, other computer);
+        // groups with sessions that need the user come first
         var groups: [String: [Session]] = [:]
-        for s in sessions { groups[s.folder, default: []].append(s) }
+        for s in sessions { groups[(s.device.map { $0 + "\u{0}" } ?? "") + s.folder, default: []].append(s) }
         let ordered = groups.sorted { a, b in
             let ra = a.value.map { $0.sessionState.rank }.min() ?? 9, rb = b.value.map { $0.sessionState.rank }.min() ?? 9
             if ra != rb { return ra < rb }
             return (a.value.map(\.activity).max() ?? 0) > (b.value.map(\.activity).max() ?? 0)
         }
-        for (folder, items) in ordered {
-            stack.addArrangedSubview(section(folder: folder, items: items.sorted { $0.sessionState.rank < $1.sessionState.rank }))
+        for (_, items) in ordered {
+            stack.addArrangedSubview(section(folder: items[0].folder, device: items[0].device, items: items.sorted { $0.sessionState.rank < $1.sessionState.rank }))
         }
         for v in stack.arrangedSubviews { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
     }
 
-    private func section(folder: String, items: [Session]) -> NSView {
+    private func section(folder: String, device: String?, items: [Session]) -> NSView {
         let v = NSView()
         v.translatesAutoresizingMaskIntoConstraints = false
         let icon = NSImageView(image: Theme.icon("folder.fill", nil)!)
@@ -99,8 +100,13 @@ final class SessionsViewController: NSViewController {
         icon.translatesAutoresizingMaskIntoConstraints = false
         let name = label((folder as NSString).lastPathComponent, size: 15, weight: .semibold)
         let branch = items.first?.branch ?? ""
-        let path = label(shortPath(folder) + (branch.isEmpty ? "" : "  ·  ⎇ \(branch)"), size: 12, color: .secondaryLabelColor)
+        let off = items.allSatisfy(\.isOffline)
+        // a helper computer's folder: "on <device>" (and "offline" when it does not answer); its path is on that computer
+        let place = device.map { "on \($0)\(off ? " · offline" : "")  ·  \(folder)" } ?? shortPath(folder)
+        let path = label(place + (branch.isEmpty ? "" : "  ·  ⎇ \(branch)"), size: 12, color: .secondaryLabelColor)
+        if let device { path.setAccessibilityIdentifier("sessions.device.\(device)") }
         let add = ActionButton("New Session Here", symbol: "plus") { AppDelegate.shared.window.showNewSession(folder: folder) }
+        add.isHidden = device != nil   // a new session on a helper computer is a later step
         add.controlSize = .small
         let grid = CardGrid()
         for s in items { grid.add(card(s)) }
@@ -127,7 +133,8 @@ final class SessionsViewController: NSViewController {
         let c = CardView()
         if s.sessionState == .needs { c.tint = Theme.red }
         c.onClick = { AppDelegate.shared.window.show(.session(s.id)) }
-        c.accessibleName = "\(s.name), \(s.sessionState.label)"
+        c.accessibleName = "\(s.name), \(s.sessionState.label)" + (s.device.map { ", on \($0)\(s.isOffline ? ", offline" : "")" } ?? "")
+        if s.isOffline { c.alphaValue = 0.45 }
         c.setAccessibilityIdentifier("card.\(s.name)")
         c.onMenu = { _ in SessionMenu.make(for: s, open: { AppDelegate.shared.window.show(.session(s.id)) }, rename: { SessionMenu.askRename(s) }) }
         let dot = StatusDot(); dot.state = s.sessionState

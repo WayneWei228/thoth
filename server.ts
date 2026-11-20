@@ -25,10 +25,12 @@ import * as Devices from './lib/devices.ts';
 import { readRecords, outsideHolders, paneSessions, paneRunning, isBlocked, migrationPlan } from './lib/elsewhere.ts';
 import * as Firewall from './lib/firewall.ts';
 import { highlight } from './lib/highlight.ts';
+import * as Heartbeat from './lib/heartbeat.ts';
 import * as HookState from './lib/hookstate.ts';
 import { instance as makeInstance, guardedFolder } from './lib/instance.ts';
 import * as Media from './lib/media.ts';
 import * as Pairing from './lib/pairing.ts';
+import * as Peer from './lib/peer.ts';
 import * as Permissions from './lib/permissions.ts';
 import * as PermNeed from './lib/permneed.ts';
 import * as RelayConfig from './lib/relay_client.ts';
@@ -490,6 +492,17 @@ interface Snapshot {
   platform?: string;
 }
 let snapshot: Snapshot = { sessions: [], ts: 0 };
+// the owner's helper computers (lib/peer.ts): their sessions join the state message
+const peerSet = Peer.createPeerSet({
+  onChange: () => {
+    broadcast();
+  },
+});
+/** The state message: this Mac's sessions, then each helper's (id r:<device>:<window>, `device`, `offline`). */
+function stateOut(): Omit<Snapshot, 'sessions'> & { sessions: object[] } {
+  const views = peerSet.views();
+  return views.length ? { ...snapshot, sessions: Peer.mergeSessions(snapshot.sessions, views) } : snapshot;
+}
 const prevState = new Map<string, string>();
 
 // ---------- hook state (lib/hookstate.ts) ----------
@@ -1164,13 +1177,7 @@ async function brainUp(): Promise<boolean> {
 const CLOUD_DEVICE_FILE = path.join(INST.home, 'cloud-device.json');
 // the device agent's file (device/join.sh); CC_DEVICE_AGENT_FILE moves it in tests
 const AGENT_DEVICE_FILE = env('CC_DEVICE_AGENT_FILE') || path.join(os.homedir(), '.cc-brain', 'device.json');
-const readJson = (f: string): unknown => {
-  try {
-    return JSON.parse(fs.readFileSync(f, 'utf8'));
-  } catch {
-    return null;
-  }
-};
+const readJson = Devices.readJson;
 /** This computer's identity on the cloud brain (lib/devices.ts pickIdentity), or null. */
 function cloudIdentity(): (NonNullable<ReturnType<typeof Devices.pickIdentity>> & { file: string }) | null {
   const loc = Setup.loadBrainLocation(INST.home);
@@ -1252,6 +1259,114 @@ setInterval(() => {
 setTimeout(() => {
   void pushSelf();
 }, 5000).unref();
+
+// Device heartbeat (lib/heartbeat.ts, brain/heartbeat.py): every 30 s this computer tells the brain
+// it is online, its role, power, load, sessions, projects and tools. Outgoing only. The project scan
+// and the claude/codex checks run less often. After a 404 (an older brain) the same brain is asked
+// again in 10 minutes; after 401/403/429 (a refused token) in an hour (Heartbeat.waitAfter).
+// CC_PANEL_NO_BRAIN or CC_PANEL_NO_HEARTBEAT turn it off.
+const THOTH_VERSION = ((): string => {
+  const v = (readJson(path.join(ROOT, 'package.json')) as { version?: unknown } | null)?.version;
+  return typeof v === 'string' ? v : '';
+})();
+const beat = {
+  projects: { at: 0, key: '\u0000', list: [] as Heartbeat.Project[] },
+  tools: { at: 0, claude: false, codex: false },
+  pause: null as Heartbeat.Pause | null,
+  lastLog: '',
+};
+function heartbeatTarget(): Heartbeat.Target | null {
+  const id = cloudIdentity();
+  const loc = Setup.loadBrainLocation(INST.home);
+  // a test instance uses only its own brain (verify's plan_brain sets CC_BRAIN_PORT), never the user's
+  const local =
+    INST.test && !env('CC_BRAIN_PORT')
+      ? null
+      : { url: `http://127.0.0.1:${String(BRAIN_PORT)}`, token: brainToken(), cloud: false };
+  return Heartbeat.target({
+    identity: id ? id.conf : null,
+    agent: readJson(AGENT_DEVICE_FILE) as Heartbeat.DeviceConf | null,
+    brain: loc ? { url: loc.url, token: loc.owner_token, cloud: true } : local,
+    hostName: Devices.hostName(),
+    test: Boolean(INST.test),
+  });
+}
+function pmsetBatt(): Promise<string> {
+  if (process.platform !== 'darwin') return Promise.resolve('');
+  return new Promise((resolve) => {
+    execFile('pmset', ['-g', 'batt'], { timeout: 5000 }, (_e, out) => {
+      resolve(out || '');
+    });
+  });
+}
+/** Is the codex CLI there? Async (never blocks the server, unlike Codex.availability). */
+function codexInstalled(): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile('codex', ['--version'], { timeout: 10_000 }, (e) => {
+      resolve(!e);
+    });
+  });
+}
+function heartbeatLog(text: string): void {
+  if (text === beat.lastLog) return;
+  beat.lastLog = text;
+  console.log('heartbeat: ' + text);
+}
+async function sendHeartbeat(now: number = Date.now()): Promise<void> {
+  if (env('CC_PANEL_NO_BRAIN') || env('CC_PANEL_NO_HEARTBEAT')) return;
+  const t = heartbeatTarget();
+  if (!t) return;
+  const key = `${t.url} ${Devices.hash(t.token)}`;
+  if (Heartbeat.paused(beat.pause, key, now)) return;
+  // with the owner token: the brain's own name for this computer (devices.json), when known
+  if (t.device !== undefined && !LOCAL_DEVICE) await brainUp();
+  const device = t.device === undefined ? undefined : Heartbeat.deviceName(LOCAL_DEVICE, t.device);
+  const live = snapshot.sessions.filter((x) => x.running);
+  const folders = live.map((x) => x.folder);
+  const scanKey = Heartbeat.rescan(beat.projects, folders, now);
+  if (scanKey !== null)
+    beat.projects = { at: now, key: scanKey, list: Heartbeat.findProjects(HOME, [...new Set(folders)]) };
+  if (now - beat.tools.at > 5 * 60_000) {
+    beat.tools = { at: now, claude: Setup.which('claude') !== null, codex: await codexInstalled() };
+  }
+  const hb = Heartbeat.build({
+    role: setupState()['role'],
+    onAc: Heartbeat.onAcPower(await pmsetBatt()),
+    load: os.loadavg()[0] ?? 0,
+    cpus: os.cpus().length,
+    sessionStates: live.map((x) => x.state),
+    projects: beat.projects.list,
+    claude: beat.tools.claude,
+    codex: beat.tools.codex,
+    version: THOTH_VERSION,
+  });
+  const target: BrainTarget = { cloud: true, url: new URL(t.url), token: t.token };
+  try {
+    const r = await brainRequest('POST', '/api/heartbeat', device === undefined ? hb : { ...hb, device }, {
+      target,
+      timeout: 15000,
+    });
+    const wait = Heartbeat.waitAfter(r.status);
+    beat.pause = wait ? { key, until: now + wait } : null;
+    if (r.status === 404)
+      heartbeatLog(`the brain at ${target.url.host} has no heartbeat API (an older brain); trying again in 10 minutes`);
+    else if (wait)
+      heartbeatLog(`the brain at ${target.url.host} refused (${String(r.status)}); trying again in an hour`);
+    else heartbeatLog(r.status === 200 ? `sent to ${target.url.host}` : `the brain answered ${String(r.status)}`);
+  } catch (error) {
+    heartbeatLog(`cannot reach the brain at ${target.url.host}: ${errMsg(error)}`);
+  }
+}
+let heartbeatRunning = false;
+function heartbeatTick(): void {
+  if (heartbeatRunning) return;
+  heartbeatRunning = true;
+  void sendHeartbeat().finally(() => {
+    heartbeatRunning = false;
+  });
+}
+setInterval(heartbeatTick, Heartbeat.EVERY_MS).unref();
+setTimeout(heartbeatTick, 3000).unref();
 
 /** A handoff in the brain's list (GET /api/handoffs). */
 interface Handoff {
@@ -2831,6 +2946,10 @@ const actions: Record<string, Action> = {
   },
   reveal({ folder, app }) {
     if (typeof folder !== 'string' || !fs.existsSync(folder)) throw new Error('Folder not found');
+    // only a folder of a session on this Mac: `open` launches an app or script it is given, and a
+    // helper computer's session (lib/peer.ts) names folders of another computer
+    if (!snapshot.sessions.some((s) => s.folder === folder) || !fs.statSync(folder).isDirectory())
+      throw new Error('Not a folder of a session on this Mac');
     const args = app === 'code' ? ['-a', 'Visual Studio Code', folder] : [folder];
     execFile('open', args);
     return {};
@@ -3119,7 +3238,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         }
         try {
           const parsed: unknown = body ? JSON.parse(body) : {};
-          const result = await action(asObj(parsed) ?? {});
+          const args = asObj(parsed) ?? {};
+          // a session on a helper computer (lib/peer.ts): the action goes to that computer
+          if (Peer.isRemoteId(args['id'])) {
+            const r = await peerAction(name, args);
+            sendJson(res, r.status, r.json);
+            return;
+          }
+          const result = await action(args);
           pollSoon(200);
           sendJson(res, 200, result ?? {});
         } catch (e) {
@@ -3155,7 +3281,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
   if (url.pathname === '/api/state') {
-    sendJson(res, 200, snapshot);
+    sendJson(res, 200, stateOut());
     return;
   }
   if (url.pathname === '/api/setup') {
@@ -3184,6 +3310,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (url.pathname === '/' && !setupState().done) {
     res.writeHead(302, { Location: '/setup.html' });
     res.end();
+    return;
+  }
+  if (Peer.READS.has(url.pathname) && Peer.isRemoteId(url.searchParams.get('win'))) {
+    await peerRead(url, res);
     return;
   }
   if (url.pathname === '/api/chat') {
@@ -3481,7 +3611,7 @@ const server = http.createServer((req, res) => {
 // ---------- websockets ----------
 const stateClients = new Set<WebSocket>();
 function broadcast(): void {
-  const msg = JSON.stringify({ type: 'state', ...snapshot });
+  const msg = JSON.stringify({ type: 'state', ...stateOut() });
   for (const ws of stateClients) if (ws.readyState === 1) ws.send(msg);
 }
 
@@ -3507,7 +3637,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
   const url = new URL(req.url ?? '/', `http://${HOST}:${String(PORT)}`);
   if (url.pathname === '/ws/state') {
     stateClients.add(ws);
-    ws.send(JSON.stringify({ type: 'state', ...snapshot }));
+    ws.send(JSON.stringify({ type: 'state', ...stateOut() }));
     ws.on('close', () => stateClients.delete(ws));
     return;
   }
@@ -3685,6 +3815,16 @@ const relayClient = RelayConfig.createRelayClient({
  * ends every open remote connection: a WebSocket that was authorized with the old token must not
  * stay open (a lost phone). The listeners stay. Returns { changed, closed }. */
 function syncRemote(): { changed: boolean; closed: number } {
+  // a helper computer (setup role "helper", lib/peer.ts): reachable through the relay only, always
+  const helper = isHelper();
+  if (helper) {
+    try {
+      Pairing.turnOn(INST.home);
+      RelayConfig.ensureDefault(INST.home);
+    } catch (e) {
+      console.log(`helper: cannot set up the relay: ${errMsg(e)}`);
+    }
+  }
   if (!Remote.enabled(INST.home)) {
     remoteListeners.closeAll();
     relayClient.sync(INST.home, false);
@@ -3711,11 +3851,15 @@ function syncRemote(): { changed: boolean; closed: number } {
     console.log(`remote access: new pairing token or certificate; closed ${String(closed)} open connection(s)`);
   }
   const port = Number(env('CC_PANEL_REMOTE_PORT') || PORT);
+  // a helper opens no listener on any address: devices reach each other only through the cloud
   void remoteListeners.sync(
-    Remote.listenPlan(os.networkInterfaces(), {
-      testHost: process.env['CC_PANEL_REMOTE_TEST_HOST'],
-      testLanHost: process.env['CC_PANEL_REMOTE_TEST_LAN_HOST'],
-    }),
+    Peer.listenPlanFor(
+      helper,
+      Remote.listenPlan(os.networkInterfaces(), {
+        testHost: process.env['CC_PANEL_REMOTE_TEST_HOST'],
+        testLanHost: process.env['CC_PANEL_REMOTE_TEST_LAN_HOST'],
+      }),
+    ),
     port,
   );
   relayClient.sync(INST.home, true);
@@ -3723,6 +3867,159 @@ function syncRemote(): { changed: boolean; closed: number } {
 }
 syncRemote();
 setInterval(syncRemote, 30000);
+
+// ---------- remote panel (lib/peer.ts, brain/peers.py; multi-device plan PR 4) ----------
+// A helper computer seals its pairing link to the main panel's key and leaves it on the brain; the
+// main panel (the one with the owner token) opens it and reaches the helper through the relay, TLS
+// pinned, like a remote client. No LAN address, no open port, no SSH.
+function isHelper(): boolean {
+  return setupState()['role'] === 'helper';
+}
+/** This computer as a cloud device: the panel's own device file, else the device agent's. */
+function helperIdentity(): { hub: string; token: string } | null {
+  const own = cloudIdentity();
+  const c = own ? own.conf : (readJson(AGENT_DEVICE_FILE) as Devices.DeviceConf | null);
+  const hub = asText(c?.hub),
+    token = asText(c?.token);
+  return c?.mode === 'cloud' && /^https?:\/\//.test(hub) && token ? { hub, token } : null;
+}
+const peerLog = { last: '' };
+function peerNote(text: string): void {
+  if (text === peerLog.last) return;
+  peerLog.last = text;
+  console.log('remote panel: ' + text);
+}
+const published = { key: '', at: 0, skipUntil: 0 };
+/** Helper: put this computer's link, sealed to each main panel's key, on the brain (when it changed,
+ * and every 10 minutes). */
+async function publishPeerLink(now = Date.now()): Promise<void> {
+  if (!isHelper() || env('CC_PANEL_NO_BRAIN') || now < published.skipUntil) return;
+  const id = helperIdentity();
+  const relay = RelayConfig.pairingInfo(INST.home);
+  if (!id || !relay || !remote.token || !remote.pin) return;
+  const target: BrainTarget = { cloud: true, url: new URL(id.hub), token: id.token };
+  try {
+    const k = await brainRequest('GET', '/api/peer/keys', null, { target, timeout: 15000 });
+    if (k.status === 404) {
+      published.skipUntil = now + 10 * 60_000;
+      peerNote(`the brain at ${target.url.host} has no remote panel API (an older brain)`);
+      return;
+    }
+    const keys = asObj(k.json)?.['keys'];
+    if (k.status !== 200 || !Array.isArray(keys)) throw new Error(`the brain answered ${String(k.status)}`);
+    const link = Remote.pairingLink({
+      hosts: [],
+      port: PORT,
+      pin: remote.pin,
+      token: remote.token,
+      relay,
+      name: COMPUTER,
+    });
+    const key = crypto
+      .createHash('sha256')
+      .update(link + Peer.keysFingerprint(keys as { id?: unknown }[]))
+      .digest('hex');
+    if (key === published.key && now - published.at < 10 * 60_000) return;
+    const sealed = Peer.sealFor(keys as { id?: unknown; key?: unknown }[], link);
+    const r = await brainRequest('POST', '/api/peer/link', { sealed }, { target, timeout: 15000 });
+    if (r.status !== 200) throw new Error(`the brain answered ${String(r.status)}`);
+    published.key = key;
+    published.at = now;
+    peerNote(`link for ${String(Object.keys(sealed).length)} main panel(s) on ${target.url.host}`);
+  } catch (e) {
+    peerNote(`cannot publish the link: ${errMsg(e)}`);
+  }
+}
+const peerFetch = { skipUntil: 0 };
+/** Main panel: post this panel's public key, read the helpers' sealed links, connect to each. */
+async function syncPeers(now = Date.now()): Promise<void> {
+  const loc = Setup.loadBrainLocation(INST.home);
+  if (!loc || env('CC_PANEL_NO_BRAIN') || isHelper()) {
+    peerSet.sync([]);
+    return;
+  }
+  if (now < peerFetch.skipUntil) return;
+  try {
+    const kp = Peer.loadKeyPair(INST.home);
+    // the key on every round: the brain drops keys that were not posted for a while (and the 8th
+    // newest), so a panel that was away gets its key back at once
+    const k = await brainRequest('POST', '/api/peer/key', { key: kp.pub }, { timeout: 15000 });
+    if (k.status === 404) {
+      peerFetch.skipUntil = now + 10 * 60_000;
+      peerNote(`the brain has no remote panel API (an older brain)`);
+      return;
+    }
+    if (k.status !== 200) throw new Error(`the brain answered ${String(k.status)}`);
+    const r = await brainRequest('GET', `/api/peer/links?key=${Peer.keyId(kp.pub)}`, null, { timeout: 15000 });
+    const links = asObj(r.json)?.['links'];
+    if (r.status !== 200 || !Array.isArray(links)) throw new Error(`the brain answered ${String(r.status)}`);
+    const self = confDevice(cloudDevice());
+    const list: { device: string; link: string }[] = [];
+    for (const x of links) {
+      const o = asObj(x);
+      const device = asText(o?.['device']);
+      const link = Peer.open(kp, asText(o?.['blob']));
+      if (device && device !== self && link !== null && Peer.parseLink(link)) list.push({ device, link });
+    }
+    peerSet.sync(list);
+    peerNote(`${String(list.length)} helper computer(s)`);
+  } catch (e) {
+    peerNote(`cannot read the helpers: ${errMsg(e)}`);
+  }
+}
+const PEER_EVERY = Number(env('CC_PANEL_PEER_EVERY_MS')) || 60_000;
+setInterval(() => {
+  void publishPeerLink();
+  void syncPeers();
+}, PEER_EVERY).unref();
+setTimeout(() => {
+  void publishPeerLink();
+  void syncPeers();
+}, 2500).unref();
+
+/** An action for a helper's session: sent to that helper with its own window id. */
+async function peerAction(name: string, args: Json): Promise<{ status: number; json: unknown }> {
+  const d = Peer.decideAction(name, args);
+  if (!d.forward) return { status: d.status, json: { error: d.error } };
+  const p = peerSet.get(d.device);
+  if (!p) return { status: 400, json: { error: `${d.device} is not one of your helper computers` } };
+  try {
+    const r = await p.request('POST', d.path, d.body);
+    p.pollNow();
+    let json: unknown;
+    try {
+      json = JSON.parse(r.body.toString() || '{}');
+    } catch {
+      json = { error: `${d.device} answered ${String(r.status)}` };
+    }
+    return { status: Peer.replyStatus(r.status), json };
+  } catch (e) {
+    return { status: 502, json: { error: `${d.device} does not answer: ${errMsg(e)}` } };
+  }
+}
+/** A chat read for a helper's session (GET /api/chat, /api/media, /api/toolResult): from that helper. */
+async function peerRead(url: URL, res: http.ServerResponse): Promise<void> {
+  const rid = Peer.parseRemoteId(url.searchParams.get('win'));
+  const p = rid ? peerSet.get(rid.device) : undefined;
+  if (!rid || !p) {
+    sendJson(res, 404, { error: 'No such session' });
+    return;
+  }
+  const pathQ = Peer.readPath(url.pathname, url.searchParams, rid.id);
+  if (pathQ === null) {
+    // /api/file?check=1 answers a path to open: a path on the helper is never opened on this Mac
+    sendJson(res, 403, { error: `This file is on ${rid.device}` });
+    return;
+  }
+  try {
+    const r = await p.request('GET', pathQ);
+    // a fixed content type, sandboxed: nothing of the helper runs as a page on this Mac's origin
+    res.writeHead(Peer.readStatus(r.status), Peer.readHeaders(r.type));
+    res.end(r.body);
+  } catch (e) {
+    sendJson(res, 502, { error: `${rid.device} does not answer: ${errMsg(e)}` });
+  }
+}
 
 // ---------- device listener (lib/devices.ts) ----------
 // Other devices join with a one-time code and push their sessions with their own token. Bound to

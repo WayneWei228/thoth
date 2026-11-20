@@ -23,9 +23,15 @@ struct Session: Codable, Hashable {
     let title: String?      // AI title of the conversation
     let activity: Double    // ms since epoch
     let agent: String?      // "claude" | "codex"; missing = "claude"
+    /// A session on one of the owner's helper computers (lib/peer.ts): the device's name. nil = this Mac.
+    let device: String?
+    /// The helper computer does not answer now: the last known state, shown grey.
+    let offline: Bool?
 
     var agentId: String { agent ?? "claude" }
     var isCodex: Bool { agentId == "codex" }
+    var isRemote: Bool { device != nil }
+    var isOffline: Bool { offline == true }
     var sessionState: SessionState { SessionState(rawValue: state) ?? .idle }
     var folderName: String { (folder as NSString).lastPathComponent }
 }

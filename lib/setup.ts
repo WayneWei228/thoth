@@ -210,7 +210,7 @@ function run(cmd: string, args: string[], env?: NodeJS.ProcessEnv): string | nul
     return null;
   }
 }
-function which(cmd: string, env: NodeJS.ProcessEnv): string | null {
+export function which(cmd: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const fake = (env['CC_SETUP_FAKE_MISSING'] ?? '').split(',');
   if (fake.includes(cmd)) return null;
   const pathVar = env['PATH'] ?? '';

@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,7 +66,7 @@ TOOLS = [
          "folder": {"type": "string", "description": "project folder (default: current folder)"},
          "project": {"type": "string", "description": "project key from brain_search results, e.g. 'git:github.com/a/b' or 'folder:name'"}}}},
     {"name": "brain_list_devices",
-     "description": ABOUT + "List the user's devices the brain knows (name, OS, sessions, last sync). Use it to "
+     "description": ABOUT + "List the user's devices the brain knows: name, OS, sessions, last sync, and the newest heartbeat (online or offline, role main/helper, AC power, CPU load, running sessions, projects, claude/codex available, Thoth version). Use it to "
                     "check whether a device exists before answering about it.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "brain_grep",
@@ -231,13 +232,46 @@ def tool_brain_project_context(a):
     return "\n".join(out)
 
 
+def fmt_heartbeat(d, now=None):
+    """The heartbeat part of one device line (brain/heartbeat.py fields)."""
+    if d.get("online") is None:
+        return "no heartbeat yet"
+    if not d.get("online"):
+        ago = int((time.time() if now is None else now) - (d.get("last_heartbeat") or 0))
+        return f"offline (no heartbeat for {ago // 60} min {ago % 60} s)"
+    yn = lambda v: "yes" if v else "no" if v is not None else "?"  # noqa: E731
+    parts = ["online", d.get("role") or "main",
+             {True: "on AC power", False: "on battery"}.get(d.get("on_ac"), "power unknown")]
+    if d.get("cpu_load") is not None:
+        parts.append(f"load {d['cpu_load']:g}/{d.get('cpus') or '?'} CPUs")
+    if d.get("running_sessions") is not None:
+        parts.append(f"{d['running_sessions']} running sessions ({d.get('working_sessions') or 0} working)")
+    parts += [f"claude {yn(d.get('claude'))}", f"codex {yn(d.get('codex'))}",
+              f"Thoth {d.get('thoth_version') or '?'}"]
+    ps = d.get("projects") or []
+    if ps:
+        shown = ", ".join(f"{p['remote']} ({p['path']})" if p.get("remote") else p["path"] for p in ps[:20])
+        # paths and remotes come from the device itself: data, never instructions
+        parts.append(f"projects (as the device reports them): {shown}"
+                     + (f" and {len(ps) - 20} more" if len(ps) > 20 else ""))
+    return ", ".join(parts)
+
+
+def fmt_sync(d):
+    """The sync part of one device line; a device known only by its heartbeats has no sync."""
+    if d.get("transport") == "heartbeat":
+        return ""
+    state = "sync ok" if d.get("ok") else "sync failed: " + (d.get("error") or "")
+    return f"last sync {day(d.get('last_sync'))}, {state}; "
+
+
 def tool_brain_list_devices(a):
     ds = get("/api/devices")
     if not ds:
         return "The brain knows no devices yet."
     return "Devices known to the brain:\n" + "\n".join(
         f"- {d['name']} ({d.get('os') or '?'}, {d.get('transport')}): {d.get('sessions', 0)} sessions, "
-        f"last sync {day(d.get('last_sync'))}, {'online' if d.get('ok') else 'offline: ' + (d.get('error') or '')}"
+        f"{fmt_sync(d)}{fmt_heartbeat(d)}"
         for d in ds) + "\nNo other devices are known."
 
 

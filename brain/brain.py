@@ -34,6 +34,8 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python3 -I leaves the script folder out of sys.path
 import cloud_auth  # noqa: E402
+import peers  # noqa: E402
+import heartbeat  # noqa: E402
 COLLECTOR = os.path.join(HERE, "collector.py")
 CONF_DIR = os.path.expanduser(os.environ.get("CC_BRAIN_DIR", "~/.config/cc-brain"))
 DB_PATH = os.path.join(CONF_DIR, "brain.db")
@@ -120,6 +122,8 @@ def connect(path=None):
     db.create_function("regexp", 2, _regexp, deterministic=True)
     db.executescript(SCHEMA)
     cloud_auth.init(db)
+    peers.init(db)
+    heartbeat.init(db)
     if not path:
         try:
             os.chmod(DB_PATH, 0o600)   # holds token hashes and everyone's session summaries
@@ -427,7 +431,9 @@ def remove_device(db, name):
     """Remove one device from the brain: its sessions, its collected memory files, its device record
     (cloud devices: its token too) and, for a device the brain pulls from, its line in devices.json.
     Notes that agents saved with brain_remember stay: they belong to the project, not to the device.
-    The brain's own computer cannot be removed. Returns what was deleted. Raises ValueError/LookupError."""
+    The brain's own computer cannot be removed. A device known only by its heartbeats (sent with the
+    owner token) comes back with its next heartbeat while it runs: stop Thoth there first.
+    Returns what was deleted. Raises ValueError/LookupError."""
     name = str(name or "").strip()
     if not name:
         raise ValueError("device name required")
@@ -437,6 +443,7 @@ def remove_device(db, name):
     known = (db.execute("SELECT 1 FROM devices WHERE name=?", (name,)).fetchone()
              or db.execute("SELECT 1 FROM cloud_devices WHERE name=?", (name,)).fetchone()
              or db.execute("SELECT 1 FROM sessions WHERE device=? LIMIT 1", (name,)).fetchone()
+             or db.execute("SELECT 1 FROM heartbeats WHERE device=?", (name,)).fetchone()
              or any(d.get("name") == name for d in conf))
     if not known:
         raise LookupError('the brain has no device called "%s"' % name)
@@ -451,6 +458,9 @@ def remove_device(db, name):
             db.execute("DELETE FROM memories_fts WHERE rowid=?", (i,))
         db.execute("DELETE FROM memories WHERE origin='file' AND device=?", (name,))
         db.execute("DELETE FROM devices WHERE name=?", (name,))
+        heartbeat.forget(db, name)
+    for r in db.execute("SELECT id FROM cloud_devices WHERE name=?", (name,)).fetchall():
+        peers.forget_device(db, r["id"])
     cloud_auth.remove(db, name)
     pulled = False
     if os.path.exists(DEVICES_PATH) and any(d.get("name") == name for d in conf):
@@ -955,8 +965,10 @@ def reserved_names(db):
     return names
 
 
-def all_devices(db):
-    """GET /api/devices: pulled devices (local, ssh, push) and cloud devices with their status."""
+def all_devices(db, now=None):
+    """GET /api/devices: pulled devices (local, ssh, push) and cloud devices with their status, and
+    each device's newest heartbeat (brain/heartbeat.py). A device known only by its heartbeats (sent
+    with the owner token) has transport 'heartbeat'."""
     cloud = cloud_auth.list_devices(db)
     cloud_names = {d["name"] for d in cloud}
     out = []
@@ -969,7 +981,11 @@ def all_devices(db):
         d.update(ok=1 if d["status"] == "approved" and not d["last_error"] else 0, error=d["last_error"],
                  last_sync=d["last_seen"])
         out.append(d)
-    return out
+    known = {d["name"] for d in out}
+    for name in sorted(set(heartbeat.latest(db)) - known):
+        out.append({"name": name, "os": "", "transport": "heartbeat", "sessions": 0, "status": "approved",
+                    "ok": 1, "error": "", "last_sync": None, "last_seen": None, "last_error": ""})
+    return heartbeat.attach(out, db, time.time() if now is None else now)
 
 
 class HttpError(Exception):
@@ -1156,6 +1172,8 @@ class Handler(BaseHTTPRequestHandler):
         m = JOIN_ROUTE.match(u.path)
         if m:
             return self.poll_join(m.group(1))
+        if u.path in ("/api/peer/keys", "/api/peer/links"):
+            return self.peer_get(u.path, q)
         read = {"/api/sessions", "/api/memories", "/api/context", "/api/search", "/api/projects", "/api/grep",
                 "/api/session"}
         owner = {"/api/devices", "/api/handoffs"}
@@ -1258,6 +1276,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, c)
         if path == "/api/ingest":
             return self.ingest()
+        if path in ("/api/peer/key", "/api/peer/link"):
+            return self.peer_post(path)
+        if path == "/api/heartbeat":
+            return self.heartbeat()
         if path == "/api/enrich":
             self.auth("owner")
             body = self.body()
@@ -1331,6 +1353,69 @@ class Handler(BaseHTTPRequestHandler):
                 raise HttpError(429, str(e))
         log_event("device %s (%s) asks to join from %s" % (r["device"], r["pending_id"], ip))
         return self.send(200, r)
+
+    def peer_get(self, path, q):
+        """GET /api/peer/keys (device or owner) and /api/peer/links?key= (owner): brain/peers.py."""
+        if path == "/api/peer/keys":
+            self.auth("read")
+            with self.lock:
+                return self.send(200, {"keys": peers.keys(self.db)})
+        self.peer_owner()
+        with self.lock:
+            try:
+                return self.send(200, {"links": peers.links(self.db, q.get("key", ""))})
+            except ValueError as e:
+                raise HttpError(400, str(e))
+
+    def peer_owner(self):
+        """The owner token itself: local trust (a loopback brain with no owner token, any local
+        process) cannot add a key or read the sealed links."""
+        role, _ = self.auth("owner")
+        if role != "owner":
+            raise HttpError(401, "this needs the owner token")
+
+    def peer_post(self, path):
+        """POST /api/peer/key {key} (owner) and /api/peer/link {sealed} (device token only)."""
+        if path == "/api/peer/key":
+            self.peer_owner()
+            b = self.body()
+            with self.lock:
+                try:
+                    kid = peers.add_key(self.db, b.get("key"), time.time())
+                except ValueError as e:
+                    raise HttpError(400, str(e))
+            return self.send(200, {"id": kid})
+        role, dev = self.auth("device")
+        if dev is None:
+            raise HttpError(403, "this needs a device token")
+        b = self.body()
+        with self.lock:
+            try:
+                n = peers.set_links(self.db, dev["id"], b.get("sealed"), time.time())
+            except ValueError as e:
+                raise HttpError(400, str(e))
+        return self.send(200, {"device": dev["name"], "stored": n})
+    def heartbeat(self):
+        """POST /api/heartbeat {role, on_ac, cpu_load, ...} every 30 s (brain/heartbeat.py). With a device
+        token the token decides the device name; with the owner token the body names it (a computer
+        that is not a cloud device, for example the brain's own computer)."""
+        role, dev = self.auth("device")
+        b = self.body(heartbeat.MAX_BODY)
+        if dev is not None:
+            name = dev["name"]
+        else:
+            raw = str(b.get("device") or "").strip()
+            with self.lock:
+                known = reserved_names(self.db)
+            # a device the brain already has keeps its exact name (devices.json names it after the host
+            # name, which may break the rule for new names); a new name must follow the rule
+            name = raw if raw in known and 0 < len(raw) <= 100 else raw.lower()
+            if name not in known and not cloud_auth.valid_name(name):
+                raise HttpError(400, "bad device name")
+        hb = heartbeat.clean(b)
+        with self.lock:
+            heartbeat.store(self.db, name, hb, time.time())
+        return self.send(200, {"device": name, "every": 30, "offline_after": heartbeat.OFFLINE_AFTER})
 
     def ingest(self):
         """POST /api/ingest {doc}. With a device token the token decides the device name (a name in the
