@@ -150,7 +150,6 @@ A read-only index of every Claude Code and Codex session on every device, with s
 python3 brain/brain.py sync --all     # pull from every device
 python3 brain/brain.py search "login bug"   # search from the terminal
 python3 brain/brain.py serve          # API on 127.0.0.1:7879, sync every 2 min
-brain/install-mac.sh                  # optional: run serve as a launchd agent
 ```
 
 - `brain/collector.py` runs on each device (Python stdlib, macOS/Windows/Linux), read-only, redacts secrets.
