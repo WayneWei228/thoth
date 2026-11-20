@@ -1,7 +1,17 @@
 // The panel page (index.html), laid out as the Mac app: the sidebar (pages and sessions), Home with the
 // Ask box, All Sessions, All Devices, the Session page (Chat and Terminal), dialogs and the menu keys.
-import { HASH_RE, PAGES, canChooseFolder, hashFor, isPage, parseHash, stateClass } from './pages.js';
-import type { Page } from './pages.js';
+import {
+  HASH_RE,
+  PAGES,
+  canChooseFolder,
+  canFetch,
+  fetchText,
+  hashFor,
+  isPage,
+  parseHash,
+  stateClass,
+} from './pages.js';
+import type { FetchInfo, Page } from './pages.js';
 
 interface Choice {
   n: number;
@@ -23,6 +33,8 @@ interface Session {
   sid?: string;
   running: boolean;
   activity?: number;
+  offline?: boolean;
+  fetch?: FetchInfo; // the newest "Fetch result" of a helper session (lib/fetch_result.ts)
 }
 interface Route {
   id: string;
@@ -102,8 +114,16 @@ const LABEL: Record<string, string> = {
   idle: 'Ready',
   stopped: 'Not running',
   elsewhere: 'Open elsewhere',
+  preparing: 'Preparing',
+  failed: 'Did not start',
 };
 const label = (s: Session): string => LABEL[s.state] ?? s.state;
+const isFetching = (s: Session): boolean => s.fetch?.state === 'fetching';
+const randomHex = (n: number): string =>
+  [...crypto.getRandomValues(new Uint8Array(n))].map((b) => b.toString(16).padStart(2, '0')).join('');
+function fetchResult(s: Session): Promise<unknown> {
+  return isFetching(s) ? api('fetchCancel', { id: s.id }) : api('fetchResult', { id: s.id, fetchId: randomHex(8) });
+}
 const isMac = /Mac|iPad/.test(navigator.userAgent);
 const wsBase = (): string => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
 
@@ -948,7 +968,15 @@ for (const n of document.querySelectorAll<HTMLElement>('#sidebar .nav'))
   });
 
 // ---------- All Sessions (SessionsViewController.swift): one section per project folder ----------
-const RANK: Record<string, number> = { needs: 0, working: 1, idle: 2, elsewhere: 3, stopped: 4 };
+const RANK: Record<string, number> = {
+  needs: 0,
+  failed: 0,
+  working: 1,
+  preparing: 1,
+  idle: 2,
+  elsewhere: 3,
+  stopped: 4,
+};
 const rank = (s: Session): number => RANK[s.state] ?? 9;
 const FOLDER_IC =
   '<svg class="fic" viewBox="0 0 20 20" aria-hidden="true"><path class="fill" d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.6 1.8H16a1.5 1.5 0 0 1 1.5 1.5v7.2a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z"/></svg>';
@@ -1507,6 +1535,8 @@ $('#dev-add').addEventListener('click', () => {
 // Add a Computer / Reconnect (AddDeviceController.swift)
 interface DeviceCommand {
   device?: string;
+  /** a Mac on a cloud brain: one prompt for Claude Code there (lib/setup_prompt.ts) */
+  prompt?: string;
   mode?: string;
   since?: number | string;
   command?: string;
@@ -1525,8 +1555,10 @@ const addDev = (() => {
     os = $as('#ad-os', HTMLSelectElement),
     create = $as('#ad-create', HTMLButtonElement),
     copyBtn = $('#ad-copy'),
+    promptBtn = $('#ad-prompt'),
     closeBtn = $('#ad-close');
   let reconnect: string | null = null,
+    prompt = '',
     taken: string[] = [],
     device = '',
     localMode = false,
@@ -1626,6 +1658,8 @@ const addDev = (() => {
     joined = false;
     since = Number(r.since ?? 0);
     $('#ad-cmd').textContent = r.command ?? '';
+    prompt = r.prompt ?? '';
+    promptBtn.classList.toggle('hidden', !prompt);
     $('#ad-where').textContent =
       sys === 'windows'
         ? `On ${device}: open PowerShell, paste the command, press Enter.`
@@ -1705,6 +1739,14 @@ const addDev = (() => {
       e.preventDefault();
       void createPressed();
     }
+  });
+  promptBtn.addEventListener('click', () => {
+    void copyText(prompt).then(() => {
+      within(promptBtn, 'span').textContent = 'Copied';
+      setTimeout(() => {
+        within(promptBtn, 'span').textContent = 'Copy Prompt for Claude Code';
+      }, 1500);
+    });
   });
   copyBtn.addEventListener('click', () => {
     void copyText($('#ad-cmd').textContent).then(() => {
@@ -1800,6 +1842,8 @@ function renderDetail(): void {
   $('#a-start').classList.toggle('hidden', s.running);
   $('#a-start span').textContent = has(s.sid) ? 'Resume' : 'Start';
   $('#a-stop').classList.toggle('hidden', s.state !== 'working');
+  $('#a-fetch').classList.toggle('hidden', !canFetch(s));
+  $('#a-fetch span').textContent = isFetching(s) ? 'Cancel Fetch' : 'Fetch Result';
   renderChoices(s, who);
   renderNotice(s, who);
   // the composer only in Chat mode and only while the agent runs
@@ -1844,16 +1888,18 @@ function renderChoices(s: Session, who: string): void {
 }
 function renderNotice(s: Session, who: string): void {
   const nt = $('#notice');
-  if (s.state === 'elsewhere') {
-    nt.textContent =
+  let text = '';
+  if (s.state === 'elsewhere')
+    text =
       'This conversation is open in another window (VS Code or a terminal). Click Resume to move it here: the other copy is closed and the conversation continues in the panel. A message sent here does the same.';
-    nt.classList.remove('hidden');
-  } else if (s.state === 'stopped') {
-    nt.textContent = has(s.sid)
+  else if (s.state === 'stopped')
+    text = has(s.sid)
       ? `${who} is not running here. Click Resume to continue this conversation.`
       : `${who} is not running here. Click Start.`;
-    nt.classList.remove('hidden');
-  } else nt.classList.add('hidden');
+  // a helper session's recent "Fetch result" above the state notice (Models.swift FetchInfo)
+  if (has(s.device) && s.fetch) text = fetchText(s.fetch, s.device) + (text ? `\n${text}` : '');
+  nt.textContent = text;
+  nt.classList.toggle('hidden', !text);
 }
 
 // ---------- terminal ----------
@@ -2002,6 +2048,13 @@ $('#a-code').addEventListener(
     if (s) await api('reveal', { folder: s.folder, app: 'code' });
   }),
 );
+$('#a-fetch').addEventListener(
+  'click',
+  run(async () => {
+    const s = cur();
+    if (s) await fetchResult(s);
+  }),
+);
 $('#a-close').addEventListener('click', () => void closeSession(cur()));
 // Close at once, with no confirmation: the conversation is saved and can be resumed (SessionMenu.close)
 async function closeSession(s: Session | undefined): Promise<void> {
@@ -2134,6 +2187,9 @@ function showMenu(x: number, y: number, s: Session): void {
     ],
     !s.running && [has(s.sid) ? 'Resume' : 'Start', run(() => api('start', { id: s.id }))],
     s.state === 'working' && ['Stop (Esc)', run(() => api('interrupt', { id: s.id }))],
+    ...(canFetch(s)
+      ? (['-', [isFetching(s) ? 'Cancel Fetch' : 'Fetch Result', run(() => fetchResult(s))]] as (MenuItem | '-')[])
+      : []),
     // a helper computer's session (lib/peer.ts): its folder is on that computer; it closes there
     ...(has(s.device)
       ? []

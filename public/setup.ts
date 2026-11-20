@@ -1,6 +1,8 @@
 // The setup page (setup.html): five steps (devices, connect, brain, keep it on, move sessions in),
 // then the manage view. Talks to /api/setup* (server.ts, lib/setup.ts).
 
+import { presence, presenceText } from './device_status.js';
+
 // ---------- the answers of /api/setup* ----------
 interface Commands {
   posix: string;
@@ -43,6 +45,9 @@ interface CloudDevice {
   sessions: number;
   lastSeen?: number;
   error?: string;
+  /** brain heartbeat: true/false, null = no heartbeat data (an old agent) */
+  online?: boolean | null;
+  lastHeartbeat?: number;
 }
 interface Push {
   ok: boolean;
@@ -368,9 +373,11 @@ function stepSub(k: number): string {
   const s = S();
   if (k === 1) return plural(s.devices.length, 'computer');
   if (k === 2 && isCloud() && s.cloud) {
-    const a = (s.cloud.approved ?? []).filter((d) => d.self !== true).length,
-      w = (s.cloud.pending ?? []).length;
-    return `${n(a)} connected${w ? `, ${n(w)} waiting` : ''}`;
+    const a = (s.cloud.approved ?? []).filter((d) => d.self !== true),
+      w = (s.cloud.pending ?? []).length,
+      on = a.filter((d) => presence(d) === 'online').length,
+      known = a.some((d) => presence(d) !== 'unknown');
+    return `${plural(a.length, 'computer')}${known ? `, ${n(on)} online` : ''}${w ? `, ${n(w)} waiting` : ''}`;
   }
   if (k === 2) {
     const o = others();
@@ -769,7 +776,7 @@ const cloudHub = (): Hub => ({ name: 'Cloud brain', os: 'cloud', sub: S().cloud?
 function cloudMap(): string {
   const c = S().cloud;
   const nodes = [
-    ...(c?.approved ?? []).map((d) => ({ name: d.name, os: d.os, on: true })),
+    ...(c?.approved ?? []).map((d) => ({ name: d.name, os: d.os, on: cloudOnline(d) })),
     ...(c?.pending ?? []).map((d) => ({ name: d.name, os: d.os, on: false })),
   ];
   return deviceMap(cloudHub(), nodes.slice(0, 6));
@@ -833,6 +840,12 @@ function askCard(d: CloudDevice, later: boolean): string {
     <div class="grow"><div class="dname">${esc(d.name)} <b>wants to join</b></div><div class="dmeta">${esc(OS[d.os] ?? 'Unknown system')}${has(d.host) ? `, computer name ${esc(d.host)}` : ''}</div></div>
     <div class="decide"><button class="btn small primary" data-decide="approve" data-id="${esc(d.id)}">Approve</button><button class="btn small" data-decide="ignore" data-id="${esc(d.id)}">Ignore</button>${later ? '' : `<button class="btn small ghost" data-decide="later" data-id="${esc(d.id)}">Later</button>`}</div></div></div>`;
 }
+// an approved cloud computer: online only by its heartbeat (this computer runs this page: online)
+const cloudOnline = (d: CloudDevice): boolean => d.self === true || presence(d) === 'online';
+function cloudStatus(d: CloudDevice): string {
+  const t = d.self === true ? 'Online' : presenceText(d, ago);
+  return t ? `, ${esc(t)}` : '';
+}
 function cloudDevicesHtml(): string {
   const c = S().cloud;
   if (!c) return '';
@@ -865,17 +878,19 @@ function cloudDevicesHtml(): string {
       }
     </details>`;
   h +=
-    '<h3>Connected</h3>' +
+    '<h3>Your computers</h3>' +
     (appr.length > 0
       ? `<div class="stack">${appr
           .map(
-            (d) => `<div class="box"><div class="row"><div class="ico on">${glyph(d.os)}</div>
-      <div class="grow"><div class="dname">${esc(d.name)}</div><div class="dmeta">${esc((OS[d.os] ?? d.os) || 'Unknown system')}${d.self === true ? ', this computer' : ''}${nonZero(d.lastSeen) ? `, last sent ${ago(d.lastSeen)}` : ''}</div></div>
-      <div class="dact"><span class="pill ok"><span class="d"></span>${plural(d.sessions, 'session')}</span>${d.self === true || d.joined !== true ? '' : `<button class="btn small ghost" data-decide="revoke" data-id="${esc(d.id)}" data-name="${esc(d.name)}">Disconnect</button>`}</div></div>
+            (
+              d,
+            ) => `<div class="box"><div class="row"><div class="ico ${cloudOnline(d) ? 'on' : ''}">${glyph(d.os)}</div>
+      <div class="grow"><div class="dname">${esc(d.name)}</div><div class="dmeta">${esc((OS[d.os] ?? d.os) || 'Unknown system')}${d.self === true ? ', this computer' : ''}${cloudStatus(d)}</div></div>
+      <div class="dact"><span class="pill ${cloudOnline(d) ? 'ok' : ''}"><span class="d"></span>${plural(d.sessions, 'session')}</span>${d.self === true || d.joined !== true ? '' : `<button class="btn small ghost" data-decide="revoke" data-id="${esc(d.id)}" data-name="${esc(d.name)}">Disconnect</button>`}</div></div>
       ${has(d.error) ? `<p class="small" style="color:var(--red);margin:8px 0 0">${esc(d.error)}</p>` : ''}</div>`,
           )
           .join('')}</div>`
-      : '<div class="list"><div class="none"><b>No computer is connected yet</b>Approved computers appear here.</div></div>');
+      : '<div class="list"><div class="none"><b>No computer has joined yet</b>Approved computers appear here.</div></div>');
   if (ign.length > 0)
     h += `<details class="fold"><summary>Ignored (${n(ign.length)})</summary><div class="stack">${ign
       .map(
@@ -1486,7 +1501,7 @@ const cloudKey = (x: Setup): string => {
   const c = x.cloud;
   if (!c) return '';
   const lists = [c.pending, c.later, c.approved, c.ignored]
-    .map((l) => (l ?? []).map((d) => `${d.id}:${n(d.sessions)}`).join(','))
+    .map((l) => (l ?? []).map((d) => `${d.id}:${n(d.sessions)}:${String(d.online)}`).join(','))
     .join('|');
   return `${lists}${String(c.up)}:${JSON.stringify(c.self?.push ?? {})}:${String(c.self?.pushing)}`;
 };

@@ -12,6 +12,9 @@ struct BrainDevice: Codable, Hashable {
     let silent: Bool?
     /// This panel can make a new join command for it.
     let reconnect: Bool?
+    /// The brain's heartbeat: true/false; nil = no heartbeat data (an old agent), no online claim.
+    let online: Bool?
+    let last_heartbeat: Double?
 }
 
 struct BrainSession: Codable, Hashable {
@@ -223,8 +226,10 @@ final class EverywhereViewController: NSViewController {
                 self?.queryChanged()
             }
             let silent = d.ok == 1 && d.silent == true
+            // the brain's own error, when it has one, stays the text ("offline: <error>")
+            let offline = d.online == false && d.transport != "local" && (d.ok == 1 || (d.error ?? "").isEmpty)
             let dot = StatusDot()
-            dot.state = d.ok == 1 && !silent ? .idle : .needs
+            dot.state = d.ok == 1 && !silent && !offline ? .idle : .needs
             let isWin = (d.os ?? "").lowercased().contains("windows")
             let icon = NSImageView(image: Theme.icon(isWin ? "pc" : "laptopcomputer", nil)!)
             icon.contentTintColor = .secondaryLabelColor
@@ -232,9 +237,11 @@ final class EverywhereViewController: NSViewController {
             let name = label(d.name + (d.transport == "local" ? " (this Mac)" : ""), size: 13, weight: .semibold)
             name.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
             let synced = d.last_sync.map { ago($0 * 1000) } ?? "never"
-            let detail = label(silent ? "\(d.sessions ?? 0) sessions · nothing new for \(synced)"
+            let seen = (d.last_heartbeat ?? d.last_sync).map { "Offline · last seen \(ago($0 * 1000))" } ?? "Offline"
+            let detail = label(offline ? "\(d.sessions ?? 0) sessions · \(seen)"
+                               : silent ? "\(d.sessions ?? 0) sessions · nothing new for \(synced)"
                                : d.ok == 1 ? "\(d.sessions ?? 0) sessions · synced \(synced)" : "offline: \(d.error ?? "")",
-                               size: 11, color: silent ? .systemOrange : .secondaryLabelColor)
+                               size: 11, color: silent || offline ? .systemOrange : .secondaryLabelColor)
             [dot, icon, name, detail].forEach { chip.addSubview($0) }
             // every computer but this one can be removed
             var trailing = chip.trailingAnchor

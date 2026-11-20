@@ -162,7 +162,7 @@ final class Backend {
     private func apply(_ state: StateMessage) {
         connected = true
         // ignore updates that only move the activity clock
-        let key = state.sessions.map { "\($0.id)|\($0.name)|\($0.state)|\($0.last)|\($0.question)|\($0.options.count)|\($0.title ?? "")|\($0.prompt ?? "")|\($0.branch)|\($0.device ?? "")|\($0.isOffline)" }
+        let key = state.sessions.map { "\($0.id)|\($0.name)|\($0.state)|\($0.last)|\($0.question)|\($0.options.count)|\($0.title ?? "")|\($0.prompt ?? "")|\($0.branch)|\($0.device ?? "")|\($0.isOffline)|\($0.fetch.map { "\($0.id)/\($0.state)/\($0.step)" } ?? "")" }
             .joined(separator: "\n") + "#" + (state.routes ?? []).map { "\($0.id)|\($0.status)|\($0.target ?? "")" }.joined(separator: ",")
             + "#\(state.restoring == true)"
         let first = sessions.isEmpty && !state.sessions.isEmpty

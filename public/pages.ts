@@ -31,4 +31,32 @@ export const canChooseFolder = (platform: string): boolean => platform === '' ||
 
 const STATES = new Set(['needs', 'working', 'idle', 'stopped', 'elsewhere']);
 /** A session state that is safe as a CSS class name: one of the known states, else "idle". */
-export const stateClass = (state: string): string => (STATES.has(state) ? state : 'idle');
+// a new session on a helper (lib/remote_new.ts): preparing looks like working, failed like needs
+const LOOKS: Record<string, string> = { preparing: 'working', failed: 'needs' };
+export const stateClass = (state: string): string => LOOKS[state] ?? (STATES.has(state) ? state : 'idle');
+
+/** "Fetch result" of a helper session (lib/fetch_result.ts; Models.swift FetchInfo). */
+export interface FetchInfo {
+  id: string;
+  state: string; // fetching | fetched | failed
+  step: string;
+  error: string;
+  branch: string;
+  commit: string;
+  repo: string;
+  dirty: number;
+}
+
+/** A helper session that has started and answers: its work can be fetched (Session.canFetch). */
+export const canFetch = (s: { device?: string; state: string; offline?: boolean }): boolean =>
+  (s.device ?? '') !== '' && s.state !== 'preparing' && s.state !== 'failed' && s.offline !== true;
+
+/** The notice line of a fetch (FetchInfo.text in Models.swift). */
+export function fetchText(f: FetchInfo, device: string): string {
+  if (f.state === 'fetching') return `Fetching the result from ${device}: ${f.step}…`;
+  if (f.state === 'fetched') {
+    const left = f.dirty > 0 ? ` ${String(f.dirty)} uncommitted file(s) on ${device} were not fetched.` : '';
+    return `${f.step}: ${f.branch} at ${f.commit} in ${f.repo}. Your checkout did not change.${left}`;
+  }
+  return `Fetch result failed: ${f.error}`;
+}

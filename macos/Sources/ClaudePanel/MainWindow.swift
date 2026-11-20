@@ -87,6 +87,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             if restorePending && b.connected { restorePending = false; restoreUntil = Date().addingTimeInterval(8) }
             let waiting = restorePending || b.restoring || (restoreUntil.map { Date() < $0 } ?? false)
             let here = b.session(id)
+            // a preparing row of a new session on a helper became that session: follow it
+            if here == nil, let s = b.sessions.first(where: { $0.preparedAs == id }) { show(.session(s.id)); return }
             // tmux restarted: window ids are given out again, so the saved transcript id decides
             // which window holds the conversation (the same id may now be another conversation)
             let want = LastPage.savedSid(id)

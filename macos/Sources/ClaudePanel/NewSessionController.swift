@@ -13,6 +13,9 @@ final class NewSessionController: NSViewController, NSTableViewDataSource, NSTab
     private var history: [HistoryItem] = []
     private let agentControl = NSSegmentedControl(labels: ["Claude Code", "Codex"], trackingMode: .selectOne, target: nil, action: nil)
     private let agentNote = label("", size: 11, color: .secondaryLabelColor)
+    /// "This Mac", then the helper computers (GET /api/peers): where a new conversation starts.
+    private let computerPopup = NSPopUpButton()
+    private var peers: [PeerInfo] = []
     private static let agentKey = "newSession.agent"
     private static let agentIds = ["claude", "codex"]
 
@@ -50,6 +53,16 @@ final class NewSessionController: NSViewController, NSTableViewDataSource, NSTab
         agentControl.setToolTip("Start Claude Code in this folder", forSegment: 0)
         agentControl.setToolTip("Start the Codex CLI in this folder", forSegment: 1)
         let or = label("or double-click a previous conversation to continue it:", size: 12, color: .secondaryLabelColor)
+        let computerLabel = label("Computer:", size: 12, color: .secondaryLabelColor)
+        computerPopup.translatesAutoresizingMaskIntoConstraints = false
+        computerPopup.setAccessibilityIdentifier("newSession.computer")
+        computerPopup.addItem(withTitle: "This Mac")
+        computerPopup.target = self
+        computerPopup.action = #selector(computerPicked)
+        computerPopup.toolTip = "Where the new conversation runs. On another computer, the code of this folder's git project goes there; your checkout does not change."
+        // a request the router already holds goes to this Mac's sessions (choosing a computer comes later)
+        computerLabel.isHidden = routeId != nil
+        computerPopup.isHidden = routeId != nil
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -74,10 +87,15 @@ final class NewSessionController: NSViewController, NSTableViewDataSource, NSTab
         fresh.setAccessibilityIdentifier("newSession.start")
         choose.setAccessibilityIdentifier("newSession.choose")
 
-        [title, step1, folderField, choose, recentPopup, step2, agentControl, fresh, agentNote, or, scroll, emptyLabel, cancel, cont].forEach { root.addSubview($0) }
+        [title, computerLabel, computerPopup, step1, folderField, choose, recentPopup, step2, agentControl, fresh, agentNote, or, scroll, emptyLabel, cancel, cont].forEach { root.addSubview($0) }
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
             title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22),
+            computerPopup.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -22),
+            computerPopup.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            computerPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 160),
+            computerLabel.trailingAnchor.constraint(equalTo: computerPopup.leadingAnchor, constant: -6),
+            computerLabel.centerYAnchor.constraint(equalTo: computerPopup.centerYAnchor),
             step1.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 18),
             step1.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             folderField.topAnchor.constraint(equalTo: step1.bottomAnchor, constant: 8),
@@ -113,8 +131,31 @@ final class NewSessionController: NSViewController, NSTableViewDataSource, NSTab
         view = root
         loadRecent()
         loadAgents()
+        loadPeers()
         loadHistory()
     }
+
+    /// The helper computer chosen in "Computer", or nil for this Mac.
+    /// The request id of a new session on a helper (lib/remote_new.ts): one per sheet.
+    private let requestId = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16))
+    private var chosenDevice: String? {
+        let i = computerPopup.indexOfSelectedItem - 1
+        return i >= 0 && i < peers.count ? peers[i].device : nil
+    }
+
+    private func loadPeers() {
+        Backend.shared.get("api/peers", as: PeerList.self) { [weak self] list in
+            guard let self else { return }
+            self.peers = list?.peers ?? []
+            for p in self.peers {
+                self.computerPopup.addItem(withTitle: p.online ? p.device : "\(p.device) (offline)")
+                self.computerPopup.lastItem?.isEnabled = p.online
+            }
+            self.computerPopup.autoenablesItems = false
+        }
+    }
+
+    @objc private func computerPicked() { loadHistory() }
 
     /// The agent "Start New Conversation" uses.
     private var chosenAgent: String {
@@ -155,6 +196,10 @@ final class NewSessionController: NSViewController, NSTableViewDataSource, NSTab
         table.reloadData()
         let f = folderField.stringValue.trimmingCharacters(in: .whitespaces)
         guard !f.isEmpty else { emptyLabel.stringValue = "Choose a folder first."; return }
+        if let device = chosenDevice {
+            emptyLabel.stringValue = "A new conversation starts on \(device), in a copy of this project."
+            return
+        }
         emptyLabel.stringValue = "Loading…"
         Backend.shared.get("api/history", query: ["folder": f], as: [HistoryItem].self) { [weak self] list in
             guard let self else { return }
@@ -212,6 +257,18 @@ final class NewSessionController: NSViewController, NSTableViewDataSource, NSTab
         }
         var body: [String: Any] = ["folder": f, "agent": agent]
         if !sid.isEmpty { body["sid"] = sid }
+        if let device = chosenDevice, sid.isEmpty {
+            // the server answers at once with a preparing row; the helper copies the code (worktree,
+            // clone or bundle) and the row becomes the session. One request id per sheet: a second
+            // click never starts a second session.
+            body["device"] = device
+            body["requestId"] = requestId
+            dismiss(nil)
+            Backend.shared.post("new", body) { r in
+                if let id = r["id"] as? String { AppDelegate.shared.window.show(.session(id)) }
+            }
+            return
+        }
         dismiss(nil)
         Backend.shared.post("new", body) { r in
             if let id = r["id"] as? String {

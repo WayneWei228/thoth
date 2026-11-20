@@ -1,10 +1,14 @@
 // `thoth always-on`: keep this Mac on as a helper computer (multi-device plan, PR 2).
 //   - launchd user services run the Thoth server (with its relay client) and the brain without the
 //     app, start them at login and restart them when they stop (scripts/services.sh install).
-//   - On AC power the Mac does not sleep (`pmset -c sleep 0`); the display may still turn off.
-//     `autorestart 1`: start again after a power failure. With --lid also `disablesleep 1`, so the
-//     Mac keeps running with the lid closed.
+//   - The Mac does not sleep in any case (owner decision 2026-11-19): `pmset -a sleep 0` (AC and
+//     battery) and `disablesleep 1` (also with the lid closed). The display may still turn off.
+//     `autorestart 1` where the Mac has it: start again after a power failure. `--lid` is an old
+//     option; it is accepted and changes nothing (the lid is always included now).
 //   - The pmset values from before are saved in <state>/always-on.json, and --undo puts them back.
+//     A file from the old always-on (AC only, lid optional) keeps its values: they are still the ones
+//     from before the first run; the battery value it lacks is read on the next run (the old command
+//     never changed it).
 //   - FileVault (and automatic login) is only reported: after a reboot someone must log in once
 //     before the user services run. This code never changes it.
 // sudo asks for the password once (`sudo -v`), and only when a pmset value must change. All
@@ -33,11 +37,16 @@ export interface Deps {
   pmset: string;
   sudo: string;
   log: (line: string) => void;
+  /** false: no terminal can ask for the sudo password (for example the shell of Claude Code). Default true. */
+  tty?: boolean;
 }
 
 /** The pmset values this command changes. null: pmset did not show the setting. */
 export interface PowerValues {
   acSleep: string | null;
+  /** null: no battery (a desktop Mac). Missing (only in a saved file of the old always-on): not
+   * recorded yet, so --undo leaves it alone. */
+  batterySleep?: string | null;
   autorestart: string | null;
   disablesleep: string | null;
 }
@@ -49,25 +58,31 @@ export interface SavedState {
   before: PowerValues;
   /** the services were installed before (then --undo leaves them) */
   servicesBefore: boolean;
-  lid: boolean;
 }
 
 export const STATE_FILE = 'always-on.json';
 
+/** Node sets `isTTY` (true) only on a terminal; on a pipe or /dev/null (the shell of Claude Code) it
+ * is missing, not false. */
+export function hasTerminal(stdin: { isTTY?: boolean }): boolean {
+  return stdin.isTTY === true;
+}
+
 /** The command line: the action, or an error (an unknown option, or options that do not go together). */
 export function parseArgs(
   args: readonly string[],
-): { action: 'enable' | 'undo' | 'status' | 'help'; lid: boolean } | { error: string } {
+): { action: 'enable' | 'undo' | 'status' | 'help' } | { error: string } {
   const known = new Set(['--lid', '--undo', '--status', '-h', '--help']);
   const unknown = args.find((a) => !known.has(a));
   if (unknown !== undefined) return { error: `unknown option ${unknown}` };
   const has = (a: string): boolean => args.includes(a);
   if (has('--undo') && (has('--status') || has('--lid'))) return { error: '--undo goes alone' };
   if (has('--status') && has('--lid')) return { error: '--status goes alone' };
-  if (has('-h') || has('--help')) return { action: 'help', lid: false };
-  if (has('--undo')) return { action: 'undo', lid: false };
-  if (has('--status')) return { action: 'status', lid: false };
-  return { action: 'enable', lid: has('--lid') };
+  if (has('-h') || has('--help')) return { action: 'help' };
+  if (has('--undo')) return { action: 'undo' };
+  if (has('--status')) return { action: 'status' };
+  // --lid: the old option for the lid; the lid is always included now, so it changes nothing
+  return { action: 'enable' };
 }
 
 /** The pmset and sudo programs. CC_ALWAYS_ON_PMSET / CC_ALWAYS_ON_SUDO (fakes for the staged test)
@@ -113,12 +128,14 @@ export function readPower(d: Deps): PowerValues {
   if (custom.code !== 0) throw new Error(`pmset -g custom failed: ${custom.stderr.trim()}`);
   const s = parseCustom(custom.stdout);
   const ac = s['AC Power'] ?? {};
+  const battery = s['Battery Power'];
   const live = d.run(d.pmset, ['-g']);
   // a guess here would be saved as the value from before, and --undo would set it
   if (live.code !== 0) throw new Error(`pmset -g failed: ${live.stderr.trim()}`);
   const liveText = live.stdout;
   return {
     acSleep: ac['sleep'] ?? null,
+    batterySleep: battery?.['sleep'] ?? null,
     // a desktop Mac shows autorestart; a laptop usually does not have it
     autorestart: ac['autorestart'] ?? parseLive(liveText, 'autorestart'),
     // shown only while it is set
@@ -128,23 +145,25 @@ export function readPower(d: Deps): PowerValues {
 
 /** One pmset call: the scope flag, the key, the value. */
 export interface PmsetChange {
-  scope: '-a' | '-c';
+  scope: '-a' | '-c' | '-b';
   key: 'sleep' | 'autorestart' | 'disablesleep';
   value: string;
 }
 
 /** The pmset calls that make `now` always-on. A value that is already right needs no call. */
-export function changesFor(now: PowerValues, lid: boolean): PmsetChange[] {
+export function changesFor(now: PowerValues): PmsetChange[] {
   const out: PmsetChange[] = [];
-  if (now.acSleep !== '0') out.push({ scope: '-c', key: 'sleep', value: '0' });
+  const battery = now.batterySleep ?? null;
+  if (now.acSleep !== '0' || (battery !== null && battery !== '0')) out.push({ scope: '-a', key: 'sleep', value: '0' });
   // null: this Mac has no autorestart (most laptops); asking pmset for it every run would only fail
   if (now.autorestart !== null && now.autorestart !== '1') out.push({ scope: '-a', key: 'autorestart', value: '1' });
-  if (lid && now.disablesleep !== '1') out.push({ scope: '-a', key: 'disablesleep', value: '1' });
+  if (now.disablesleep !== '1') out.push({ scope: '-a', key: 'disablesleep', value: '1' });
   return out;
 }
 
 /** The pmset calls that put `before` back. A setting pmset did not show before is set to 0 when it
- * shows now (it was off); one that is still not shown is left alone. */
+ * shows now (it was off); one that is still not shown is left alone. A battery value that was never
+ * recorded (undefined: a file of the old always-on) is left alone. */
 export function restoreFor(now: PowerValues, before: PowerValues): PmsetChange[] {
   const out: PmsetChange[] = [];
   const want = (b: string | null, n: string | null): string | null => {
@@ -153,6 +172,10 @@ export function restoreFor(now: PowerValues, before: PowerValues): PmsetChange[]
   };
   const sleep = want(before.acSleep, now.acSleep);
   if (sleep !== null) out.push({ scope: '-c', key: 'sleep', value: sleep });
+  if (before.batterySleep !== undefined) {
+    const bs = want(before.batterySleep, now.batterySleep ?? null);
+    if (bs !== null) out.push({ scope: '-b', key: 'sleep', value: bs });
+  }
   const ar = want(before.autorestart, now.autorestart);
   if (ar !== null) out.push({ scope: '-a', key: 'autorestart', value: ar });
   const ds = want(before.disablesleep, now.disablesleep);
@@ -180,16 +203,19 @@ function readSaved(d: Deps): SavedState | null {
   const v = parsed as Partial<SavedState>;
   const ok = (x: unknown): x is string | null => x === null || (typeof x === 'string' && VALUE.test(x));
   const b = v.before;
-  if (v.version !== 1 || !b || !ok(b.acSleep) || !ok(b.autorestart) || !ok(b.disablesleep)) {
+  if (
+    v.version !== 1 ||
+    !b ||
+    !ok(b.acSleep) ||
+    !ok(b.autorestart) ||
+    !ok(b.disablesleep) ||
+    (b.batterySleep !== undefined && !ok(b.batterySleep))
+  ) {
     throw bad;
   }
-  return {
-    version: 1,
-    savedAt: String(v.savedAt),
-    before: b,
-    servicesBefore: v.servicesBefore === true,
-    lid: v.lid === true,
-  };
+  const before: PowerValues = { acSleep: b.acSleep, autorestart: b.autorestart, disablesleep: b.disablesleep };
+  if (b.batterySleep !== undefined) before.batterySleep = b.batterySleep;
+  return { version: 1, savedAt: String(v.savedAt), before, servicesBefore: v.servicesBefore === true };
 }
 
 function writeSaved(d: Deps, s: SavedState): void {
@@ -199,16 +225,36 @@ function writeSaved(d: Deps, s: SavedState): void {
   fs.renameSync(`${file}.tmp`, file);
 }
 
-/** Runs the pmset calls with sudo. The password is asked once (`sudo -v`), before the first call. */
-function applyPmset(d: Deps, changes: readonly PmsetChange[]): void {
-  if (changes.length === 0) return;
+const SCOPE = { '-a': 'on AC power and on battery', '-c': 'on AC power', '-b': 'on battery' } as const;
+
+/** One pmset call in words. */
+export function describe(c: PmsetChange): string {
+  if (c.key === 'sleep') return `sleep ${SCOPE[c.scope]} is now ${c.value === '0' ? 'never' : `after ${c.value} min`}`;
+  const on = c.value === '1' ? 'on' : 'off';
+  if (c.key === 'disablesleep') return `keep running with the lid closed (disablesleep) is now ${on}`;
+  return `start again after a power failure (autorestart) is now ${on}`;
+}
+
+/** Runs the pmset calls with sudo. The password is asked once (`sudo -v`), before the first call.
+ * Without a terminal sudo cannot ask: then only a sudo that needs no password goes on; else the error
+ * says to run `again` in the Terminal app (the setup prompt tells the person that). */
+function applyPmset(d: Deps, changes: readonly PmsetChange[], again: string): void {
+  if (changes.length === 0) {
+    d.log('   Nothing to change: the power settings were already right. No password was needed.');
+    return;
+  }
   d.log('Changing power settings needs your password once (sudo).');
-  if (d.run(d.sudo, ['-v'], true).code !== 0) throw new Error('sudo was not allowed; nothing was changed');
+  if (d.tty === false) {
+    if (d.run(d.sudo, ['-n', '-v']).code !== 0)
+      throw new Error(
+        `the power settings need your Mac password, and this window has no terminal to ask for it. The power settings were not changed. Open the Terminal app and run: ${again}`,
+      );
+  } else if (d.run(d.sudo, ['-v'], true).code !== 0) throw new Error('sudo was not allowed; nothing was changed');
   try {
     for (const c of changes) {
       const r = d.run(d.sudo, ['-n', d.pmset, c.scope, c.key, c.value]);
       if (r.code !== 0) throw new Error(`sudo pmset ${c.scope} ${c.key} ${c.value} failed: ${r.stderr.trim()}`);
-      d.log(`  pmset ${c.scope} ${c.key} ${c.value}`);
+      d.log(`   changed: ${describe(c)} (pmset ${c.scope} ${c.key} ${c.value})`);
     }
   } finally {
     // the approval would stay valid in this terminal for minutes (other commands there could use it)
@@ -262,35 +308,52 @@ function show(v: string | null): string {
   return v ?? 'not shown';
 }
 
-/** `thoth always-on [--lid]`. Safe to run again: the saved values stay those from the first run. */
-export function enable(d: Deps, opts: { lid: boolean }): void {
+/** The power settings, one line each: what it is called and what the value means. */
+function powerLines(v: PowerValues): string[] {
+  const battery = v.batterySleep ?? null;
+  return [
+    `sleep on AC power: ${show(v.acSleep)} (0 = never)`,
+    `sleep on battery: ${battery === null ? 'no battery' : `${battery} (0 = never)`}`,
+    `disablesleep (keeps running with the lid closed): ${show(v.disablesleep)} (1 = on)`,
+    `autorestart (start again after a power failure): ${v.autorestart === null ? 'not supported on this Mac' : `${v.autorestart} (1 = on)`}`,
+  ];
+}
+
+/** `thoth always-on`. Safe to run again: the saved values stay those from the first run. */
+export function enable(d: Deps): void {
   macOnly(d);
   const saved = readSaved(d);
   const now = readPower(d);
   const servicesBefore = saved ? saved.servicesBefore : servicesInstalled(d);
+  const before: PowerValues = saved ? { ...saved.before } : now;
+  // a file of the old always-on has no battery value; that command never changed it, so it is now's
+  if (before.batterySleep === undefined) before.batterySleep = now.batterySleep ?? null;
   // save before changing anything, so --undo works even when a later step fails
-  writeSaved(d, {
-    version: 1,
-    savedAt: saved?.savedAt ?? new Date().toISOString(),
-    before: saved?.before ?? now,
-    servicesBefore,
-    lid: opts.lid || (saved?.lid ?? false),
-  });
+  writeSaved(d, { version: 1, savedAt: saved?.savedAt ?? new Date().toISOString(), before, servicesBefore });
   d.log('1. Services: the Thoth server and brain run without the app, start at login, restart when they stop.');
   if (d.run(d.services, ['install'], true).code !== 0) {
     throw new Error(
       'installing the services failed (see above). Run: thoth doctor, then thoth always-on again, or thoth always-on --undo',
     );
   }
-  d.log('2. Power: no sleep on AC power (the display may turn off), start again after a power failure.');
-  if (opts.lid) d.log('   --lid: the Mac also keeps running with the lid closed. It can get warm in a bag.');
-  applyPmset(d, changesFor(now, opts.lid));
+  d.log(
+    '2. Power: this Mac does not sleep, on AC power and on battery, also with the lid closed. The display may turn off.',
+  );
+  applyPmset(d, changesFor(now), 'thoth always-on');
   const after = readPower(d);
-  if (after.acSleep !== '0') throw new Error(`AC sleep is still ${show(after.acSleep)} after pmset`);
-  if (after.autorestart !== '1')
-    d.log('   This Mac does not support autorestart (most laptops): after a power failure, press the power button.');
-  if (opts.lid && after.disablesleep !== '1') throw new Error('disablesleep is still off after pmset');
-  if (onAC(d) === false) d.log('   This Mac runs on battery now: connect power, or it still sleeps.');
+  const battery = after.batterySleep ?? null;
+  if (after.acSleep !== '0') throw new Error(`sleep on AC power is still ${show(after.acSleep)} after pmset`);
+  if (battery !== null && battery !== '0') throw new Error(`sleep on battery is still ${battery} after pmset`);
+  if (after.disablesleep !== '1') throw new Error('disablesleep is still off after pmset');
+  for (const l of powerLines(after)) d.log(`   ${l}`);
+  if (after.autorestart !== '1') d.log('   After a power failure, press the power button.');
+  if (battery !== null) {
+    d.log(
+      '   Note: a closed laptop in a bag stays awake and can get warm. On battery it runs until the battery is empty.',
+    );
+  }
+  if (onAC(d) === false)
+    d.log('   This Mac runs on battery now: connect power, or it stops when the battery is empty.');
   d.log(`3. Reboot: ${rebootNote(d)}`);
   d.log('Done. To undo: thoth always-on --undo');
 }
@@ -304,7 +367,7 @@ export function undo(d: Deps): void {
     d.log('Nothing to undo: thoth always-on was not run on this Mac (no saved settings).');
     return;
   }
-  applyPmset(d, restoreFor(readPower(d), saved.before));
+  applyPmset(d, restoreFor(readPower(d), saved.before), 'thoth always-on --undo');
   const after = readPower(d);
   if (restoreFor(after, saved.before).length > 0) {
     throw new Error(
@@ -328,11 +391,9 @@ export function status(d: Deps): void {
   macOnly(d);
   const saved = readSaved(d);
   const now = readPower(d);
-  d.log(`always-on: ${saved ? `on since ${saved.savedAt}${saved.lid ? ' (with --lid)' : ''}` : 'off'}`);
+  d.log(`always-on: ${saved ? `on since ${saved.savedAt}` : 'off'}`);
   d.log(`services: ${servicesInstalled(d) ? 'installed' : 'not installed'}`);
-  d.log(`AC sleep: ${show(now.acSleep)} (0 = never)`);
-  d.log(`autorestart: ${show(now.autorestart)}`);
-  d.log(`disablesleep (lid closed): ${show(now.disablesleep)}`);
+  for (const l of powerLines(now)) d.log(l);
   const ac = onAC(d);
   d.log(`power source: ${ac === null ? 'unknown' : ac ? 'AC' : 'battery'}`);
   d.log(`reboot: ${rebootNote(d)}`);

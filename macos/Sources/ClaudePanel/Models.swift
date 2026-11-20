@@ -14,7 +14,7 @@ struct Session: Codable, Hashable {
     let folder: String
     let sid: String         // Claude transcript id (for --resume), may be empty
     let running: Bool
-    let state: String       // needs | working | idle | stopped | elsewhere
+    let state: String       // needs | working | idle | stopped | elsewhere | preparing | failed
     let last: String        // Claude's last reply
     let options: [Choice]
     let question: String
@@ -27,17 +27,31 @@ struct Session: Codable, Hashable {
     let device: String?
     /// The helper computer does not answer now: the last known state, shown grey.
     let offline: Bool?
+    /// A session started from this Mac on a helper: the id of the preparing row it was (r:<device>:p-<request id>).
+    let preparedAs: String?
+    /// The newest "Fetch result" of a helper session (lib/fetch_result.ts).
+    let fetch: FetchInfo?
 
     var agentId: String { agent ?? "claude" }
     var isCodex: Bool { agentId == "codex" }
     var isRemote: Bool { device != nil }
     var isOffline: Bool { offline == true }
+    /// A new session on a helper that has not started yet (preparing) or did not start (failed): it can
+    /// only be closed, which cancels it there.
+    var isPending: Bool { sessionState == .preparing || sessionState == .failed }
+    /// A helper session whose work can be fetched to this Mac (it answers and has started).
+    var canFetch: Bool { isRemote && !isPending && !isOffline }
+    var isFetching: Bool { fetch?.state == "fetching" }
     var sessionState: SessionState { SessionState(rawValue: state) ?? .idle }
     var folderName: String { (folder as NSString).lastPathComponent }
 }
 
 enum SessionState: String {
     case needs, working, idle, stopped, elsewhere
+    /// A new session on a helper computer: the code is being copied there (lib/remote_new.ts).
+    case preparing
+    /// A new session on a helper computer did not start; `last` has the error.
+    case failed
 
     var label: String {
         switch self {
@@ -46,14 +60,16 @@ enum SessionState: String {
         case .idle: return "Ready"
         case .stopped: return "Not running"
         case .elsewhere: return "Open elsewhere"
+        case .preparing: return "Preparing"
+        case .failed: return "Did not start"
         }
     }
 
     /// Sort order: what needs a person comes first.
     var rank: Int {
         switch self {
-        case .needs: return 0
-        case .working: return 1
+        case .needs, .failed: return 0
+        case .working, .preparing: return 1
         case .idle: return 2
         case .elsewhere: return 3
         case .stopped: return 4
@@ -144,6 +160,39 @@ struct AgentInfo: Codable, Hashable {
     let name: String
     let available: Bool
     let reason: String?
+}
+
+/// "Fetch result": the work of a helper session as a branch helper/<device>/<name> in the matching
+/// repository on this Mac (lib/fetch_result.ts). state: fetching | fetched | failed.
+struct FetchInfo: Codable, Hashable {
+    let id: String
+    let state: String
+    let step: String
+    let error: String
+    let branch: String
+    let commit: String
+    let repo: String
+    let dirty: Int
+
+    /// The line the detail page shows.
+    func text(_ device: String) -> String {
+        switch state {
+        case "fetching": return "Fetching the result from \(device): \(step)…"
+        case "fetched":
+            let left = dirty > 0 ? " \(dirty) uncommitted file(s) on \(device) were not fetched." : ""
+            return "\(step): \(branch) at \(commit) in \(repo). Your checkout did not change.\(left)"
+        default: return "Fetch result failed: \(error)"
+        }
+    }
+}
+
+/// A helper computer this panel knows (GET /api/peers): a new session can start there.
+struct PeerInfo: Codable, Hashable {
+    let device: String
+    let online: Bool
+}
+struct PeerList: Codable {
+    let peers: [PeerInfo]
 }
 
 struct RecentFolder: Codable, Hashable {

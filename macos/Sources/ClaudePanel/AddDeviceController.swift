@@ -23,6 +23,9 @@ final class AddDeviceController: NSViewController {
     private let state = WrappingLabel(wrappingLabelWithString: "")
     private var create: ActionButton!
     private var copy: ActionButton!
+    /// a Mac on a cloud brain: one prompt for Claude Code there instead of the command (lib/setup_prompt.ts)
+    private var copyPrompt: ActionButton!
+    private var prompt = ""
     private var close: ActionButton!
     private var device = ""          // the computer being added; empty before step 2
     private var localMode = false    // the brain is on this computer (a listed computer must be taken back on Cancel)
@@ -73,6 +76,9 @@ final class AddDeviceController: NSViewController {
         commandBox.contentView?.addSubview(command)
         copy = ActionButton("Copy Command", symbol: "doc.on.doc") { [weak self] in self?.copyCommand() }
         copy.setAccessibilityIdentifier("addDevice.copy")
+        copyPrompt = ActionButton("Copy Prompt for Claude Code", symbol: "text.bubble") { [weak self] in self?.copyPromptPressed() }
+        copyPrompt.toolTip = "On a Mac with Claude Code: paste this prompt into Claude Code there. It installs Thoth, joins with this code, keeps the Mac on and checks the result."
+        copyPrompt.setAccessibilityIdentifier("addDevice.copyPrompt")
         note.font = .systemFont(ofSize: 12)
         note.textColor = .secondaryLabelColor
         note.setAccessibilityIdentifier("addDevice.note")
@@ -98,7 +104,7 @@ final class AddDeviceController: NSViewController {
         close.setAccessibilityIdentifier("addDevice.close")
 
         [message, note, state, sub].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
-        [title, sub, step1, nameField, osPopup, create, message, step2, where_, commandBox, copy, note, firewall, allow, spinner, state, close].forEach { root.addSubview($0) }
+        [title, sub, step1, nameField, osPopup, create, message, step2, where_, commandBox, copy, copyPrompt, note, firewall, allow, spinner, state, close].forEach { root.addSubview($0) }
         let m: CGFloat = 22
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
@@ -135,7 +141,9 @@ final class AddDeviceController: NSViewController {
             copy.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             note.centerYAnchor.constraint(equalTo: copy.centerYAnchor),
             note.leadingAnchor.constraint(equalTo: copy.trailingAnchor, constant: 10),
-            note.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
+            note.trailingAnchor.constraint(lessThanOrEqualTo: copyPrompt.leadingAnchor, constant: -10),
+            copyPrompt.centerYAnchor.constraint(equalTo: copy.centerYAnchor),
+            copyPrompt.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
             firewall.topAnchor.constraint(equalTo: copy.bottomAnchor, constant: 12),
             firewall.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             firewall.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -m),
@@ -173,6 +181,7 @@ final class AddDeviceController: NSViewController {
 
     private func showStep2(_ on: Bool) {
         [step2, where_, commandBox, copy, note].forEach { $0.isHidden = !on }
+        copyPrompt.isHidden = !on || prompt.isEmpty
         if !on { firewall.isHidden = true; allow.isHidden = true }
     }
 
@@ -210,6 +219,7 @@ final class AddDeviceController: NSViewController {
         joined = false
         since = r["since"] as? Double ?? 0
         command.stringValue = r["command"] as? String ?? ""
+        prompt = r["prompt"] as? String ?? ""
         where_.stringValue = os == "windows" ? "On \(device): open PowerShell, paste the command, press Enter."
                                              : "On \(device): open Terminal, paste the command, press Enter."
         note.stringValue = "The code in it works once, for 15 minutes."
@@ -264,6 +274,13 @@ final class AddDeviceController: NSViewController {
         Instance.pasteboard.setString(command.stringValue, forType: .string)
         copy.title = "Copied"
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.copy.title = "Copy Command" }
+    }
+
+    private func copyPromptPressed() {
+        Instance.pasteboard.clearContents()
+        Instance.pasteboard.setString(prompt, forType: .string)
+        copyPrompt.title = "Copied"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.copyPrompt.title = "Copy Prompt for Claude Code" }
     }
 
     private func closePressed() {

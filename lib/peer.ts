@@ -120,6 +120,8 @@ export interface PeerLink {
   token: string;
   name: string;
   relay: { url: string; id: string; secret: string };
+  /** the helper's peer secret (lib/remote_new.ts): only in the link sealed for main panels */
+  peer: string;
 }
 
 /** A pairing link (lib/remote.ts pairingLink) that has a relay; null otherwise. The LAN hosts of the
@@ -134,14 +136,25 @@ export function parseLink(link: unknown): PeerLink | null {
     secret = q.get('rkey') ?? '';
   if (q.get('v') !== '2' || !/^[\da-f]{64}$/.test(pin) || !/^[\w-]{32,128}$/.test(token)) return null;
   if (!Relay.validUrl(url) || !/^[\w-]{8,64}$/.test(id) || !/^[\w-]{32,128}$/.test(secret)) return null;
-  return { pin, token, name: (q.get('name') ?? '').slice(0, 60), relay: { url: url.replace(/\/+$/, ''), id, secret } };
+  const peer = q.get('peer') ?? '';
+  return {
+    pin,
+    token,
+    name: (q.get('name') ?? '').slice(0, 60),
+    relay: { url: url.replace(/\/+$/, ''), id, secret },
+    peer: /^[\w-]{32,128}$/.test(peer) ? peer : '',
+  };
 }
+
+/** The header the main panel sends the helper's peer secret in (checked by lib/remote_new.ts). */
+export const PEER_HEADER = 'x-thoth-peer';
 
 // -------------------------------------------------------------- remote ids ----
 const DEVICE = /^[a-z\d][a-z\d-]{0,30}$/;
 export const remoteId = (device: string, id: string): string => `r:${device}:${id}`;
 export function parseRemoteId(s: unknown): { device: string; id: string } | null {
-  const m = typeof s === 'string' ? /^r:([a-z\d][a-z\d-]{0,30}):(@\d+)$/.exec(s) : null;
+  // @<n>: a session; p-<request id>: a new session still preparing (lib/remote_new.ts)
+  const m = typeof s === 'string' ? /^r:([a-z\d][a-z\d-]{0,30}):(@\d+|p-[\da-f]{16})$/.exec(s) : null;
   return m ? { device: m[1] ?? '', id: m[2] ?? '' } : null;
 }
 export const isRemoteId = (s: unknown): boolean => typeof s === 'string' && s.startsWith('r:');
@@ -162,6 +175,11 @@ export type Decision =
 export function decideAction(name: string, args: Record<string, unknown>): Decision {
   const rid = parseRemoteId(args['id']);
   if (!rid) return { forward: false, status: 400, error: 'No such session' };
+  // a row still preparing: closing it cancels the request on the helper; nothing else works yet
+  if (rid.id.startsWith('p-')) {
+    if (name !== 'close') return { forward: false, status: 400, error: 'This session is not ready yet' };
+    return { forward: true, device: rid.device, path: '/api/peerCancel', body: { requestId: rid.id.slice(2) } };
+  }
   if (!ACTIONS.has(name))
     return { forward: false, status: 400, error: 'This does not work yet for a session on another computer' };
   if (Array.isArray(args['attachments']) && args['attachments'].length > 0)
@@ -228,8 +246,10 @@ const cut = (v: unknown, n = MAX_TEXT): string => (typeof v === 'string' ? v.sli
 /** A helper's session with only known fields, each of a bounded size (a helper is not trusted with
  * more than what the panel shows). */
 export function cleanSession(s: Record<string, unknown>): StateSession | null {
-  if (typeof s['id'] !== 'string' || !/^@\d+$/.test(s['id'])) return null;
+  if (typeof s['id'] !== 'string' || !/^(@\d+|p-[\da-f]{16})$/.test(s['id'])) return null;
   const out: StateSession = { id: s['id'] };
+  // the request id of a session started from the main panel (its preparing row became this session)
+  if (typeof s['request'] === 'string' && /^[\da-f]{16}$/.test(s['request'])) out['request'] = s['request'];
   for (const k of TEXT) if (typeof s[k] === 'string') out[k] = cut(s[k]);
   for (const k of ['index', 'activity']) if (typeof s[k] === 'number' && Number.isFinite(s[k])) out[k] = s[k];
   out['running'] = s['running'] === true;
@@ -266,7 +286,11 @@ export function mergeSessions(local: readonly object[], peers: readonly PeerView
     for (const s of p.sessions.slice(0, MAX_SESSIONS)) {
       if (s.device !== undefined) continue;
       const c = cleanSession(s);
-      if (c) out.push({ ...c, id: remoteId(p.device, c.id), device: p.device, offline: !p.online });
+      if (!c) continue;
+      const row: StateSession = { ...c, id: remoteId(p.device, c.id), device: p.device, offline: !p.online };
+      // the app follows its open preparing row to the session it became
+      if (typeof c['request'] === 'string') row['preparedAs'] = remoteId(p.device, `p-${c['request']}`);
+      out.push(row);
     }
   }
   return out;
@@ -387,6 +411,7 @@ export function createPeer({ device, link, everyMs = 1500, timeoutMs = 15_000, o
           timeout: timeoutMs,
           headers: {
             Authorization: `Bearer ${parsed.token}`,
+            ...(parsed.peer ? { [PEER_HEADER]: parsed.peer } : {}),
             ...(data ? { 'Content-Type': 'application/json', 'Content-Length': String(data.length) } : {}),
           },
         },

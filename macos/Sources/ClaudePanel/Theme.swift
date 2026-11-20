@@ -46,8 +46,8 @@ enum Theme {
 
     static func color(for state: SessionState) -> NSColor {
         switch state {
-        case .needs: return red
-        case .working: return amber
+        case .needs, .failed: return red
+        case .working, .preparing: return amber
         case .idle: return green
         case .stopped, .elsewhere: return .secondaryLabelColor
         }
@@ -90,7 +90,7 @@ final class StatusDot: NSView {
             layer.borderColor = c.cgColor
         }
         layer.removeAllAnimations()
-        if state == .needs || state == .working {
+        if state == .needs || state == .working || state == .preparing {
             let a = CABasicAnimation(keyPath: "opacity")
             a.fromValue = 1; a.toValue = 0.35; a.duration = state == .needs ? 0.7 : 1.0
             a.autoreverses = true; a.repeatCount = .infinity
@@ -127,7 +127,7 @@ final class Pill: NSTextField {
         stringValue = state.label
         let c = Theme.color(for: state)
         switch state {
-        case .needs: textColor = .white; layer?.backgroundColor = c.cgColor
+        case .needs, .failed: textColor = .white; layer?.backgroundColor = c.cgColor
         case .stopped, .elsewhere: textColor = .secondaryLabelColor; layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
         default: textColor = c; layer?.backgroundColor = c.withAlphaComponent(0.15).cgColor
         }
@@ -381,11 +381,20 @@ enum SessionMenu {
             m.addItem(item)
         }
         add("Open", open)
+        if s.isPending {
+            // a new session on a helper, not started: closing it cancels it there and removes its folder
+            add(s.sessionState == .preparing ? "Cancel" : "Remove") { close(s) }
+            return m
+        }
         add("Rename…", rename)
         if s.isRemote {
             // a helper computer's session (lib/peer.ts ACTIONS): no folder on this Mac, no close yet
             if !s.running { add(s.sid.isEmpty ? "Start" : "Resume") { Backend.shared.post("start", ["id": s.id]) } }
             if s.sessionState == .working { add("Stop (Esc)") { Backend.shared.post("interrupt", ["id": s.id]) } }
+            if s.canFetch {
+                m.addItem(.separator())
+                add(s.isFetching ? "Cancel Fetch" : "Fetch Result") { fetch(s) }
+            }
             return m
         }
         if !s.running { add(s.sid.isEmpty ? "Start" : "Resume") { Backend.shared.post("start", ["id": s.id]) } }
@@ -397,6 +406,17 @@ enum SessionMenu {
         m.addItem(.separator())
         add("Close Session") { close(s) }
         return m
+    }
+
+    /// "Fetch result" of a helper session: its committed work becomes a branch helper/<device>/<name>
+    /// in the matching repository here (never the current branch, index or working tree). Answers at
+    /// once; the row's `fetch` shows the progress. While it runs, the same item cancels it.
+    static func fetch(_ s: Session) {
+        if s.isFetching { Backend.shared.post("fetchCancel", ["id": s.id]); return }
+        Backend.shared.post("fetchResult", ["id": s.id, "fetchId": newFetchId()])
+    }
+    static func newFetchId() -> String {
+        (0..<8).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
     }
 
     /// Closes at once, with no confirmation: the conversation is saved and can be resumed from New Session.

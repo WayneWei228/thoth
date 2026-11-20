@@ -12,7 +12,7 @@
 #   thoth setup --role main|helper [--connect <ccbrain://link>] [--join <code>] [--hub <cloud brain>] [--name <name>] [--wait <s>]
 #                  no questions asked: set this computer's role and join the cloud brain (safe to run again;
 #                  main needs the owner connection (--connect); exit 6: waiting for Approve, run it again after that)
-#   thoth always-on [--lid] [--undo] [--status]   keep this Mac on as a helper (services, no sleep on AC)
+#   thoth always-on [--undo] [--status]   keep this Mac on as a helper (services; no sleep, lid closed too)
 #   thoth adopt    move the Claude Code or Codex session of this terminal into the panel
 #                     (Claude: the /panel command; Codex: type !thoth adopt; or: thoth adopt <session-id>)
 set -u

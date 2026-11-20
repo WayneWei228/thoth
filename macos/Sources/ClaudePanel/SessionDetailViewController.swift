@@ -17,12 +17,14 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
     private var stopBtn: ActionButton!
     /// Only for a session on this Mac (a helper computer's folder is not here; it closes from there).
     private var localOnly: [NSView] = []
+    private var closeBtn = NSView()
+    private var fetchBtn: ActionButton!
     private let choiceBar = NSView()
     private let choiceQ = label("", size: 13, weight: .semibold, lines: 2)
     /// Claude's menu as a numbered list, one option per row (like the terminal menu).
     private let choiceButtons = NSStackView()
     private let notice = NSView()
-    private let noticeLabel = label("", size: 12, lines: 2)
+    private let noticeLabel = label("", size: 12, lines: 4)
     private let termHolder = NSView()
     private var composer: ComposerBox!
     private var choiceKey = ""
@@ -83,7 +85,13 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
             if let s = self?.current { SessionMenu.close(s) }
         }
         close.toolTip = "Close session"
-        localOnly = [finder, code, close]
+        closeBtn = close
+        fetchBtn = ActionButton("Fetch Result", symbol: "arrow.down.circle") { [weak self] in
+            if let s = self?.current { SessionMenu.fetch(s) }
+        }
+        fetchBtn.toolTip = "Take the committed work of this session to this Mac as a branch helper/<computer>/<name>. Your checkout does not change."
+        fetchBtn.setAccessibilityIdentifier("detail.fetch")
+        localOnly = [finder, code]
         resumeBtn.setAccessibilityIdentifier("detail.resume")
         stopBtn.setAccessibilityIdentifier("detail.stop")
         finder.setAccessibilityIdentifier("detail.finder")
@@ -94,7 +102,7 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
         modeSwitch.action = #selector(modeChanged)
         modeSwitch.setAccessibilityIdentifier("detail.mode")
         modeSwitch.setToolTip("Chat view or the raw terminal", forSegment: 0)
-        let actions = NSStackView(views: [modeSwitch, resumeBtn, stopBtn, finder, code, close])
+        let actions = NSStackView(views: [modeSwitch, resumeBtn, stopBtn, fetchBtn, finder, code, close])
         actions.spacing = 6
         actions.translatesAutoresizingMaskIntoConstraints = false
         [dot, nameField, editBtn, pills, titleLabel, pathLabel, actions].forEach { header.addSubview($0) }
@@ -293,14 +301,18 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
         let ph = Self.placeholder(s.isCodex ? "Codex" : "Claude")
         if composer.text.placeholder != ph { composer.text.placeholder = ph }
         titleLabel.stringValue = s.title ?? ""
-        let place = s.device.map { "on \($0)  ·  \(s.folder)" } ?? shortPath(s.folder)
+        let place = s.device.map { s.folder.isEmpty ? "on \($0)" : "on \($0)  ·  \(s.folder)" } ?? shortPath(s.folder)
+        editBtn.isHidden = s.isPending   // a row still preparing cannot be renamed
         pathLabel.stringValue = place + (s.branch.isEmpty ? "" : "  ·  ⎇ \(s.branch)")
         modeSwitch.isHidden = s.isRemote
         localOnly.forEach { $0.isHidden = s.isRemote }
+        closeBtn.isHidden = s.isRemote && !s.isPending   // a pending row on a helper: closing cancels it
         if s.isRemote && chat.isHidden { applyMode() }
-        resumeBtn.isHidden = s.running || s.isOffline
+        resumeBtn.isHidden = s.running || s.isOffline || s.isPending
         resumeBtn.title = s.sid.isEmpty ? "Start" : "Resume"
         stopBtn.isHidden = s.sessionState != .working || s.isOffline
+        fetchBtn.isHidden = !s.canFetch
+        fetchBtn.title = s.isFetching ? "Cancel Fetch" : "Fetch Result"
         updateComposer()
 
         // choice bar: Claude's menu as buttons
@@ -334,6 +346,12 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
             return
         }
         switch s.sessionState {
+        case .preparing:
+            noticeLabel.stringValue = "Thoth is copying this project to \(s.device ?? "the other computer") (a new worktree, a clone, or a copy of this folder). The session starts there by itself and shows here. Close it to cancel."
+            notice.isHidden = false
+        case .failed:
+            noticeLabel.stringValue = "The session did not start on \(s.device ?? "the other computer"): \(s.last)\nClose it to remove this row."
+            notice.isHidden = false
         case .elsewhere:
             noticeLabel.stringValue = "This conversation is open in another window (VS Code or a terminal). Click Resume to move it here: the other copy is closed and the conversation continues in the panel. A message sent here does the same."
             notice.isHidden = false
@@ -342,6 +360,13 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
             notice.isHidden = false
         default:
             notice.isHidden = true
+        }
+        // a helper session's recent "Fetch result" (progress, branch, or error) above the state notice;
+        // the server drops a finished one from the row after 10 minutes
+        if s.isRemote, let f = s.fetch {
+            let line = f.text(s.device ?? "the helper")
+            noticeLabel.stringValue = notice.isHidden ? line : line + "\n" + noticeLabel.stringValue
+            notice.isHidden = false
         }
     }
 

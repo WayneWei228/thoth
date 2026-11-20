@@ -21,10 +21,12 @@ import { TranscriptFile, ChatRevisions, wasSent, wasSentFile, pendingEchoes } fr
 import { claudeArgs, stateHooks } from './lib/claude_args.ts';
 import * as Codex from './lib/codex.ts';
 import * as Copies from './lib/copies.ts';
+import * as DevicePick from './lib/device_pick.ts';
 import * as Devices from './lib/devices.ts';
 import { readRecords, outsideHolders, paneSessions, paneRunning, isBlocked, migrationPlan } from './lib/elsewhere.ts';
 import * as Firewall from './lib/firewall.ts';
 import { highlight } from './lib/highlight.ts';
+import * as Fetch from './lib/fetch_result.ts';
 import * as Heartbeat from './lib/heartbeat.ts';
 import * as HookState from './lib/hookstate.ts';
 import { instance as makeInstance, guardedFolder } from './lib/instance.ts';
@@ -35,6 +37,7 @@ import * as Permissions from './lib/permissions.ts';
 import * as PermNeed from './lib/permneed.ts';
 import * as RelayConfig from './lib/relay_client.ts';
 import * as Remote from './lib/remote.ts';
+import * as RemoteNew from './lib/remote_new.ts';
 import { createRemoteListeners } from './lib/remote_listen.ts';
 import * as Restore from './lib/restore.ts';
 import * as router from './lib/router.ts';
@@ -42,8 +45,10 @@ import { parseScreen, ANSI, inputBoxText, type MenuOption } from './lib/screen.t
 import * as Setup from './lib/setup.ts';
 import * as SetupFix from './lib/setup_fix.ts';
 import * as SetupOutside from './lib/setup_outside.ts';
+import * as SetupPrompt from './lib/setup_prompt.ts';
 import * as Thumb from './lib/thumb.ts';
 import * as Tidy from './lib/tidy.ts';
+import * as Trust from './lib/trust.ts';
 
 const ROOT = import.meta.dirname;
 const env = (name: string): string => process.env[name] ?? '';
@@ -495,13 +500,122 @@ let snapshot: Snapshot = { sessions: [], ts: 0 };
 // the owner's helper computers (lib/peer.ts): their sessions join the state message
 const peerSet = Peer.createPeerSet({
   onChange: () => {
+    linkHelperSessions();
     broadcast();
   },
 });
-/** The state message: this Mac's sessions, then each helper's (id r:<device>:<window>, `device`, `offline`). */
+// new sessions on a helper computer still preparing (lib/remote_new.ts). Main Mac: the brief and the
+// bundle, until the helper has the request. Helper: the folder, until the session starts.
+const newJobs = RemoteNew.createJobs(() => {
+  savePendingNew();
+  broadcast();
+});
+// "Fetch result" of a helper session (lib/fetch_result.ts). Main Mac: the fetches; helper: the bundles.
+const fetchJobs = Fetch.createFetchJobs(() => {
+  broadcast();
+});
+const makeJobs = Fetch.createMakeJobs();
+const SOURCES_FILE = path.join(INST.home, 'remote-sources.json');
+const LINKS_FILE = path.join(INST.home, 'remote-session-sources.json');
+let sessionLinks: Record<string, Fetch.Link> | null = null; // LINKS_FILE, read once
+const noSource = new Set<string>(); // request ids with no source here (not read again)
+/** Main panel: the helper rows as fetch_result.ts reads them (id r:<device>:@<n>). */
+function helperRows(): { id: string; folder?: unknown; request?: unknown }[] {
+  return peerSet
+    .views()
+    .flatMap((v) =>
+      v.sessions.map((s) => ({ id: Peer.remoteId(v.device, s.id), folder: s['folder'], request: s['request'] })),
+    );
+}
+/** Main panel: saves which helper session came from which repo here while the helper still names
+ * the request id (it forgets it when it restarts); "Fetch result" reads it (lib/fetch_result.ts). */
+function linkHelperSessions(): void {
+  sessionLinks ??= Fetch.loadLinks(LINKS_FILE);
+  const links = sessionLinks;
+  // only rows not linked yet: the sources file is read only then
+  const rows = helperRows().filter(
+    (r) => typeof r.request === 'string' && !noSource.has(r.request) && links[r.id]?.folder !== r.folder,
+  );
+  if (!rows.length) return;
+  const sources = Fetch.loadSources(SOURCES_FILE);
+  for (const r of rows)
+    if (typeof r.request === 'string' && !Object.hasOwn(sources, r.request)) noSource.add(r.request);
+  const next = Fetch.linkSessions(sessionLinks, sources, rows);
+  if (!next) return;
+  sessionLinks = next;
+  try {
+    Fetch.saveLinks(LINKS_FILE, next);
+  } catch (e) {
+    console.log(`fetch result: the session sources were not saved: ${errMsg(e)}`);
+  }
+}
+Fetch.cleanBundles(path.join(INST.home, 'tmp')); // bundles of fetches a restart cut off
+const newJobDevice = new Map<string, string>(); // main: request id -> the helper it goes to
+const newJobSeen = new Set<string>(); // main: the request ids the helper's state has shown
+// main: these jobs survive a server restart (lib/remote_new.ts loadPending): a preparing row comes
+// back as failed unless the helper's state shows the request
+const NEW_JOBS_FILE = path.join(INST.home, 'remote-new-jobs.json');
+for (const s of RemoteNew.loadPending(NEW_JOBS_FILE)) {
+  newJobs.restore(s);
+  newJobDevice.set(s.requestId, s.device);
+  if (s.seen) newJobSeen.add(s.requestId);
+}
+let newJobsSaved = '';
+/** Main: saves the jobs for helpers when they changed (a helper's own jobs are not saved). */
+function savePendingNew(): void {
+  const list = RemoteNew.pendingList(newJobs, newJobDevice, newJobSeen);
+  const text = JSON.stringify(list);
+  if (text === newJobsSaved || (!list.length && newJobsSaved === '')) return;
+  try {
+    RemoteNew.savePending(NEW_JOBS_FILE, list);
+    newJobsSaved = text;
+  } catch (e) {
+    console.log(`remote new: the jobs were not saved: ${errMsg(e)}`);
+  }
+}
+/** The state message: this Mac's sessions, then each helper's (id r:<device>:<window>, `device`,
+ * `offline`), and the preparing rows of new sessions on helpers. */
 function stateOut(): Omit<Snapshot, 'sessions'> & { sessions: object[] } {
   const views = peerSet.views();
-  return views.length ? { ...snapshot, sessions: Peer.mergeSessions(snapshot.sessions, views) } : snapshot;
+  // helper: its preparing rows; a session a request started carries the request id (`request`)
+  const own = newJobs
+    .rows()
+    .filter((j) => !newJobDevice.has(j.requestId))
+    .map((j) => RemoteNew.jobRow(j));
+  const local: object[] = [
+    ...snapshot.sessions.map((x) => {
+      const request = newJobs.requestOf(x.id);
+      return request ? { ...x, request } : x;
+    }),
+    ...own,
+  ];
+  if (!views.length) return { ...snapshot, sessions: local };
+  // main: a helper session's newest "Fetch result" (lib/fetch_result.ts) as its `fetch` field
+  const merged: object[] = Peer.mergeSessions(local, views).map((x) => {
+    const f = fetchJobs.latest(x.id);
+    return f ? { ...x, fetch: Fetch.fetchView(f) } : x;
+  });
+  // main: a request the helper's state does not show yet stays as a row of that helper here
+  for (const [rid, device] of newJobDevice) {
+    const job = newJobs.get(rid);
+    if (!job || job.state === 'cancelled') continue;
+    const view = views.find((v) => v.device === device);
+    if (
+      !newJobSeen.has(rid) &&
+      view?.sessions.some((x) => x.id === RemoteNew.rowId(rid) || x['request'] === rid) === true
+    ) {
+      newJobSeen.add(rid);
+      savePendingNew();
+    }
+    if (newJobSeen.has(rid)) continue;
+    merged.push({
+      ...RemoteNew.jobRow({ ...job, state: job.state === 'done' ? 'preparing' : job.state }),
+      id: Peer.remoteId(device, RemoteNew.rowId(rid)),
+      device,
+      offline: !(view?.online ?? false),
+    });
+  }
+  return { ...snapshot, sessions: merged };
 }
 const prevState = new Map<string, string>();
 
@@ -986,6 +1100,9 @@ interface RouteRecord {
   sid?: string | undefined;
   busy?: string | undefined;
   briefFrom?: string[] | undefined;
+  /** for a new session: the computer the device rules chose ('' = this Mac) and the rule (lib/device_pick.ts) */
+  deviceChoice?: string | undefined;
+  deviceRule?: string | undefined;
   handoffId?: string | undefined;
   tasks?: string[] | undefined;
   plan?: unknown[] | undefined;
@@ -1159,15 +1276,19 @@ interface BrainDevice {
 }
 /** The brain's device list, or null when the answer is not a list (e.g. the cloud brain refused the owner token). */
 const deviceArray = (v: unknown): BrainDevice[] | null => (Array.isArray(v) ? (v as BrainDevice[]) : null);
+/** The brain's newest device list with the heartbeat fields (for the router's device choice). */
+let brainDevices: DevicePick.Device[] = [];
 async function brainUp(): Promise<boolean> {
   try {
     const devs = deviceArray(await brainCall('GET', '/api/devices'));
+    brainDevices = DevicePick.readDevices(devs);
     if (!devs) return false; // e.g. the cloud brain refused the owner token
     const cd = cloudDevice();
     const local = cd ? { name: confDevice(cd) } : devs.find((d) => d.transport === 'local');
     if (local) LOCAL_DEVICE = local.name;
     return true;
   } catch {
+    brainDevices = []; // no brain: no helpers to choose from (not an old list)
     return false;
   }
 }
@@ -1476,33 +1597,78 @@ async function newWithBrief(
     name,
     text,
     sources = [],
-    patch = {},
+    patch: patchIn = {},
     agent = 'claude',
-  }: { folder: string; name?: string; text: string; sources?: Session[]; patch?: RoutePatch; agent?: string },
+    named = '',
+    project = folder,
+  }: {
+    folder: string;
+    name?: string;
+    text: string;
+    sources?: Session[];
+    patch?: RoutePatch;
+    agent?: string;
+    /** the computer the user named (the router's "device") */
+    named?: string;
+    /** the project folder the router chose (may be a helper's path that is not on this Mac) */
+    project?: string;
+  },
 ): Promise<void> {
+  const patch = { ...patchIn, ...deviceNote(chooseDevice(named, project, agent), patchIn.reason) };
   const id = await createWindow({ name: taskName(name, text), folder, sid: '', run: true, agent });
   await poll();
-  let message = text;
-  let briefFrom: string[] = [];
-  if (sources.length) {
-    setRoute(rid, { ...patch, status: 'briefing', folder });
-    const withDialogue = sources.map((s) => ({
-      name: s.name,
-      folder: s.folder,
-      dialogue: !isUuid(s.sid)
-        ? []
-        : s.agent === 'codex'
-          ? codexDialogue(s.sid)
-          : Brief.readDialogue(path.join(PROJECTS, slugOf(s.folder), s.sid + '.jsonl')),
-    }));
-    const brief = await Brief.runBrief(text, withDialogue);
-    if (brief) {
-      briefFrom = withDialogue.filter((s) => s.dialogue.length).map((s) => s.name);
-      message = Brief.withBrief(text, brief, briefFrom);
-    }
-  }
+  if (sources.length && text) setRoute(rid, { ...patch, status: 'briefing', folder });
+  const { message, briefFrom } = await withBackground(text, sources);
   setRoute(rid, { ...patch, status: 'queued', folder, briefFrom });
   await deliver(id, message, rid);
+}
+
+/** The computer for a new session (lib/device_pick.ts): the user's named one, the only one with the
+ * project, else this Mac unless it is busy. Only when the brain lists helpers. */
+function chooseDevice(named: string, project: string, agent: string): DevicePick.Pick {
+  const local = snapshot.sessions.filter((x) => !Peer.isRemoteId(x.id));
+  const cpus = os.cpus().length || 1;
+  return DevicePick.pickDevice(
+    DevicePick.inputFor({
+      named,
+      folder: project,
+      here: isDir(project),
+      remoteOf: gitRemoteOf,
+      local: LOCAL_DEVICE,
+      busy: DevicePick.localBusy(local.filter((x) => x.state === 'working').length, (os.loadavg()[0] ?? 0) / cpus),
+      agent,
+      devices: brainDevices,
+    }),
+  );
+}
+/** A folder's git remote on this Mac without credentials ('' = none); null = not a git repository. */
+function gitRemoteOf(folder: string): string | null {
+  const config = Heartbeat.gitConfig(folder, Heartbeat.realFiles);
+  return config === null ? null : Heartbeat.remoteFromConfig(config);
+}
+/** The route fields for a device choice (lib/device_pick.ts routeNote). */
+function deviceNote(p: DevicePick.Pick, reason: string | undefined): RoutePatch {
+  const n = DevicePick.routeNote(p, reason ?? '');
+  return { deviceChoice: n.device, deviceRule: n.rule, reason: n.reason };
+}
+
+/** The request `text` with a brief written from the recent conversations of `sources` (lib/brief.ts);
+ * the text alone when there are none or no brief came. */
+async function withBackground(text: string, sources: Session[]): Promise<{ message: string; briefFrom: string[] }> {
+  if (!sources.length || !text) return { message: text, briefFrom: [] };
+  const withDialogue = sources.map((s) => ({
+    name: s.name,
+    folder: s.folder,
+    dialogue: !isUuid(s.sid)
+      ? []
+      : s.agent === 'codex'
+        ? codexDialogue(s.sid)
+        : Brief.readDialogue(path.join(PROJECTS, slugOf(s.folder), s.sid + '.jsonl')),
+  }));
+  const brief = await Brief.runBrief(text, withDialogue);
+  if (!brief) return { message: text, briefFrom: [] };
+  const briefFrom = withDialogue.filter((s) => s.dialogue.length).map((s) => s.name);
+  return { message: Brief.withBrief(text, brief, briefFrom), briefFrom };
 }
 
 /** The recent user/assistant turns of a Codex session, for a brief ({role, text}[], like Brief.readDialogue). */
@@ -1559,6 +1725,17 @@ async function runDecision(
     text = Attachments.keepAttachments(text, d.task.trim(), ATTACH_DIR);
     setRoute(rid, { task: text });
   }
+  // a project the router named from a helper's list (lib/device_pick.ts helperProject): its exact path
+  // in the brain's list, or this Mac's own copy of it (same git remote); anything else is not a folder
+  if (d.action === 'new' && has(d.folder) && !isDir(d.folder)) {
+    const away = DevicePick.helperProject(d.folder, brainDevices, LOCAL_DEVICE);
+    d.folder = away
+      ? DevicePick.localCopy(away, brainDevices, localProjectFolders(), gitRemoteOf, isMainCheckout) || away
+      : '';
+  }
+  // the folder the router chose; a project only on a helper is not on this Mac (lib/device_pick.ts)
+  let project = d.action === 'new' && has(d.folder) ? d.folder : '';
+  const named = d.action === 'new' || d.action === 'send' || d.action === 'ask' ? (d.device ?? '') : '';
   // "new" without a usable folder goes to the default folder
   if (d.action === 'new' && (!has(d.folder) || !fs.existsSync(d.folder))) d.folder = defaultFolder();
   if (d.action === 'new') {
@@ -1568,6 +1745,7 @@ async function runDecision(
       d.reason = `${d.reason ?? ''} It starts in ${path.basename(c.folder)}, the folder you chose.`.trim();
     d.folder = c.folder;
     newAgent = c.agent;
+    if (c.chosen || !project) project = c.folder;
   }
   const pool = routable();
   const target = pool.find((s) => s.id === d.target);
@@ -1598,6 +1776,7 @@ async function runDecision(
       targetName: target ? target.name : '',
       device: d.device ?? '',
       sid: d.sid ?? '',
+      ...(d.action === 'new' ? deviceNote(chooseDevice(named, project, newAgent), d.reason) : {}),
     });
     return;
   }
@@ -1634,6 +1813,7 @@ async function runDecision(
       text,
       agent,
       sources: [target, ...contextFrom.filter((s) => s.id !== target.id)],
+      named,
       patch: {
         ...base,
         decided: 'auto-new-busy',
@@ -1659,6 +1839,8 @@ async function runDecision(
       text,
       agent: newAgent,
       sources: contextFrom,
+      named,
+      project,
       patch: { ...base, decided: 'auto-new', agent: newAgent },
     });
   } else if (!testScope) {
@@ -1678,6 +1860,8 @@ async function runDecision(
       text,
       sources: contextFrom,
       agent,
+      named,
+      project: chosen ? folder : project || folder,
       patch: {
         ...base,
         folder,
@@ -1724,6 +1908,7 @@ function route(text: string, dry = false, prefs: NewSessionPrefs = {}): string {
           localDevice: LOCAL_DEVICE,
           defaultFolder: defaultFolder(),
           codexOk: Codex.availability().available,
+          devices: brain ? DevicePick.promptDevices(LOCAL_DEVICE, brainDevices) : [],
         },
       );
       const plan = router.splitTasks(d, routable());
@@ -1938,6 +2123,28 @@ function claudeHistory(folder: string): { sid: string; mtime: number; title: str
     .map(({ sid, mtime, file }) => ({ sid, mtime, ...summarize(file) }))
     .filter((x) => x.first || x.title);
 }
+/** A main git checkout: its .git is a folder (a worktree's .git is a file). */
+function isMainCheckout(folder: string): boolean {
+  try {
+    return fs.statSync(path.join(folder, '.git')).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** This Mac's project folders for finding its copy of a helper's project: the sessions' folders,
+ * recent folders and the heartbeat's project scan (lib/heartbeat.ts findProjects), in that order. */
+function localProjectFolders(): string[] {
+  const mine = snapshot.sessions.filter((s) => !s.id.startsWith('r:')).map((s) => s.folder);
+  // no heartbeat scan yet (no brain target): scan now (a few git config reads; only on this rare path)
+  const scanned = beat.projects.list.length ? beat.projects.list : Heartbeat.findProjects(HOME, [...new Set(mine)]);
+  return DevicePick.localFolders(
+    mine,
+    recentFolders().map((f) => f.folder),
+    scanned.map((p) => p.path),
+  );
+}
+
 function recentFolders(): { folder: string; mtime: number }[] {
   if (!fs.existsSync(PROJECTS)) return [];
   const res = new Map<string, number>();
@@ -2260,6 +2467,7 @@ async function setupCloudCode(nameIn: unknown): Promise<{
   code: string;
   device: string;
   expires: number;
+  hub: string;
   commands: ReturnType<typeof Devices.cloudCommands>;
 }> {
   const loc = Setup.loadBrainLocation(INST.home);
@@ -2276,6 +2484,7 @@ async function setupCloudCode(nameIn: unknown): Promise<{
     code,
     device: name,
     expires: expires < 1e12 ? expires * 1000 : expires,
+    hub: loc.url,
     commands: Devices.cloudCommands(loc.url, code, name),
   };
 }
@@ -2512,6 +2721,9 @@ const actions: Record<string, Action> = {
         code: r.code,
         expires: r.expires,
         command: pick(r.commands),
+        // a Mac can instead paste one prompt into Claude Code there (lib/setup_prompt.ts): it installs,
+        // joins with this code, keeps the Mac on and checks the result
+        prompt: SetupPrompt.panelPrompt(dos, r),
         firewall: null,
       };
     }
@@ -2835,6 +3047,10 @@ const actions: Record<string, Action> = {
     return {};
   },
   new(body) {
+    // a session on a helper computer is started by the request router (routeNew), which knows who asks
+    const device = asText(body['device']);
+    if (device && device !== LOCAL_DEVICE)
+      throw new Error('A session on another computer can be started only from this Mac’s own Thoth');
     return newSession(body);
   },
   async start({ id }) {
@@ -2910,6 +3126,12 @@ const actions: Record<string, Action> = {
   },
   async close({ id: idIn }) {
     const id = asText(idIn);
+    // a preparing row of a new session from the main panel (lib/remote_new.ts): cancel it
+    const request = RemoteNew.requestOfRow(id);
+    if (request) {
+      newJobs.cancel(request);
+      return {};
+    }
     const s = await findSession(id);
     if (s?.running === true) {
       await tmux(['send-keys', '-t', id, 'Escape']);
@@ -3194,6 +3416,20 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     });
     return;
   }
+  // a new session from the owner's main panel (lib/remote_new.ts): its own size limit and checks
+  if (req.method === 'POST' && url.pathname === '/api/peerNew') {
+    await handlePeerNew(req, res);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/peerCancel') {
+    await handlePeerCancel(req, res);
+    return;
+  }
+  // a helper session's result for the owner's main panel (lib/fetch_result.ts)
+  if (url.pathname.startsWith('/api/peerFetch')) {
+    await handlePeerFetch(req, res, url);
+    return;
+  }
   if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
     const origin = req.headers.origin;
     if (has(origin) && !ORIGINS.has(origin)) {
@@ -3220,6 +3456,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       void (async () => {
         if (tooLarge) return;
         const name = url.pathname.slice(5);
+        // "Fetch result" of a helper session: only from this Mac's own app or page
+        if (name === 'fetchResult' || name === 'fetchCancel') {
+          try {
+            const args = asObj(body ? JSON.parse(body) : {}) ?? {};
+            sendJson(res, 200, fetchAction(name, args, req));
+          } catch (e) {
+            sendJson(res, 400, errorReply(e));
+          }
+          return;
+        }
         const action = Object.hasOwn(actions, name) ? actions[name] : undefined;
         if (!action) {
           sendJson(res, 404, { error: 'Unknown action' });
@@ -3239,6 +3485,26 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         try {
           const parsed: unknown = body ? JSON.parse(body) : {};
           const args = asObj(parsed) ?? {};
+          // a new session on a helper computer: only from this Mac's own app or page (routeNew)
+          if (name === 'new') {
+            const device = asText(args['device']);
+            const where = RemoteNew.routeNew({
+              device,
+              localDevice: LOCAL_DEVICE,
+              fromThisMac: fromThisMac(req),
+              viaRemote: viaRemote.has(req),
+              peer: peerSet.get(device)?.view(),
+            });
+            if (where === 'helper') {
+              sendJson(res, 200, startRemoteNew(args));
+              return;
+            }
+          }
+          // closing a preparing row the helper does not have yet: cancelled here
+          if (name === 'close' && cancelRemoteNew(asText(args['id']))) {
+            sendJson(res, 200, {});
+            return;
+          }
           // a session on a helper computer (lib/peer.ts): the action goes to that computer
           if (Peer.isRemoteId(args['id'])) {
             const r = await peerAction(name, args);
@@ -3282,6 +3548,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
   if (url.pathname === '/api/state') {
     sendJson(res, 200, stateOut());
+    return;
+  }
+  if (url.pathname === '/api/peers') {
+    sendJson(res, 200, { peers: peersView() });
     return;
   }
   if (url.pathname === '/api/setup') {
@@ -3907,14 +4177,11 @@ async function publishPeerLink(now = Date.now()): Promise<void> {
     }
     const keys = asObj(k.json)?.['keys'];
     if (k.status !== 200 || !Array.isArray(keys)) throw new Error(`the brain answered ${String(k.status)}`);
-    const link = Remote.pairingLink({
-      hosts: [],
-      port: PORT,
-      pin: remote.pin,
-      token: remote.token,
-      relay,
-      name: COMPUTER,
-    });
+    // the peer secret lets only a main panel (not a remote client's pairing link) start sessions here
+    const link = RemoteNew.withSecret(
+      Remote.pairingLink({ hosts: [], port: PORT, pin: remote.pin, token: remote.token, relay, name: COMPUTER }),
+      RemoteNew.loadSecret(INST.home),
+    );
     const key = crypto
       .createHash('sha256')
       .update(link + Peer.keysFingerprint(keys as { id?: unknown }[]))
@@ -4001,7 +4268,8 @@ async function peerAction(name: string, args: Json): Promise<{ status: number; j
 async function peerRead(url: URL, res: http.ServerResponse): Promise<void> {
   const rid = Peer.parseRemoteId(url.searchParams.get('win'));
   const p = rid ? peerSet.get(rid.device) : undefined;
-  if (!rid || !p) {
+  // a preparing row has no chat yet
+  if (!rid || !p || rid.id.startsWith('p-')) {
     sendJson(res, 404, { error: 'No such session' });
     return;
   }
@@ -4018,6 +4286,391 @@ async function peerRead(url: URL, res: http.ServerResponse): Promise<void> {
     res.end(r.body);
   } catch (e) {
     sendJson(res, 502, { error: `${rid.device} does not answer: ${errMsg(e)}` });
+  }
+}
+
+// ---------- a new session on a helper computer (lib/remote_new.ts; multi-device plan PR 5) ----------
+/** The helpers this panel knows, for the new-session sheet's "Computer" choice (GET /api/peers). */
+function peersView(): { device: string; online: boolean }[] {
+  return peerSet
+    .views()
+    .map((v) => ({ device: v.device, online: v.online }))
+    .toSorted((a, b) => a.device.localeCompare(b.device));
+}
+
+/** Main panel: POST /api/new with `device` = a helper (routeNew has checked who asks and that the
+ * helper answers). Answers at once with the id of a preparing row; the work runs as a job (newJobs):
+ * the code of `folder` (a git project on this Mac) reaches the helper as described in
+ * lib/remote_new.ts, and the session gets `text` with the background of the `context_from` sessions
+ * (this Mac's), like a local new session. The same `requestId` never starts a second session. */
+function startRemoteNew(body: Body): { id: string; requestId: string } {
+  const device = asText(body['device']);
+  const p = peerSet.get(device);
+  if (!p) throw new Error(`${device} is not one of your helper computers`);
+  const agent = asText(body['agent']) || 'claude';
+  if (!AGENTS.has(agent)) throw new Error('Unknown agent');
+  const folder = asText(body['folder']) || defaultFolder();
+  if (!isDir(folder)) throw new Error('Folder not found');
+  const given = asText(body['requestId']);
+  const requestId = RemoteNew.REQUEST_ID.test(given) ? given : RemoteNew.newRequestId();
+  const id = Peer.remoteId(device, RemoteNew.rowId(requestId));
+  const known = newJobDevice.get(requestId);
+  if (known !== undefined && known !== device) throw new Error('This request id was used for another computer');
+  const text = asText(body['text']).trim();
+  const name = (asText(body['name']) || taskName('', text || path.basename(folder))).slice(0, 30);
+  newJobDevice.set(requestId, device);
+  newJobs.start(requestId, { name, agent }, async (signal) => {
+    const src = await RemoteNew.sourceInfo(folder, signal);
+    // "Fetch result" later brings the work back to this repo (lib/fetch_result.ts)
+    Fetch.saveSource(SOURCES_FILE, requestId, src.root);
+    noSource.delete(requestId);
+    const ids = Array.isArray(body['context_from']) ? body['context_from'].map(asText) : [];
+    const sources = [...new Set(ids)]
+      .map((x) => snapshot.sessions.find((y) => y.id === x))
+      .filter((x): x is Session => x !== undefined)
+      .slice(0, 3);
+    const { message } = await withBackground(text, sources);
+    signal.throwIfAborted();
+    // no remote: a bundle of the folder (with its uncommitted work), the checkout unchanged
+    const bundle = src.remote
+      ? ''
+      : (
+          await RemoteNew.snapshotBundle(
+            src.root,
+            crypto.randomBytes(6).toString('hex'),
+            path.join(INST.home, 'tmp'),
+            signal,
+          )
+        ).toString('base64');
+    signal.throwIfAborted();
+    const req = {
+      requestId,
+      name,
+      agent,
+      text: message,
+      remote: src.remote,
+      commit: src.commit,
+      branch: src.branch,
+      dirty: src.dirty,
+      sub: src.sub,
+      bundle,
+      from: COMPUTER,
+    };
+    let r: Peer.Reply;
+    try {
+      // the helper answers at once; it prepares the folder as its own job and shows it in its state
+      r = await p.request('POST', '/api/peerNew', req);
+    } catch (e) {
+      throw new Error(`${device} does not answer: ${errMsg(e)}`, { cause: e });
+    }
+    let j: Json = {};
+    try {
+      j = asObj(JSON.parse(r.body.toString())) ?? {};
+    } catch {
+      /* not JSON */
+    }
+    if (r.status !== 200) throw new Error(`${device}: ${asText(j['error']) || `answered ${String(r.status)}`}`);
+    if (signal.aborted) void p.request('POST', '/api/peerCancel', { requestId }).catch(() => undefined);
+    p.pollNow();
+    return '';
+  });
+  return { id, requestId };
+}
+
+/** Main panel: closing the preparing row `id` (r:<device>:p-<request id>). Cancelled here; when the
+ * helper already has the request, it is cancelled there too (the caller then passes the close on).
+ * True when the close is done here. */
+function cancelRemoteNew(id: string): boolean {
+  const rid = Peer.parseRemoteId(id);
+  const requestId = rid ? RemoteNew.requestOfRow(rid.id) : '';
+  if (!requestId || newJobDevice.get(requestId) !== rid?.device) return false;
+  const seen = newJobSeen.has(requestId);
+  newJobSeen.add(requestId); // the row goes from this panel now
+  // a row restored as failed after a restart may be one the helper has: then it is passed on too
+  const cancelled = newJobs.get(requestId) !== undefined && newJobs.cancel(requestId);
+  if (RemoteNew.closedHere({ cancelled, seen })) return true; // the helper never had it
+  savePendingNew();
+  broadcast();
+  return false; // handed over: the helper cancels it (peerAction → /api/peerCancel)
+}
+
+/** Helper: a request from the owner's main panel only (through the relay, with the pairing token AND
+ * the peer secret of the sealed link). */
+function fromOwnerPanel(req: http.IncomingMessage): boolean {
+  return RemoteNew.mayStart({
+    helper: isHelper(),
+    viaRemote: viaRemote.has(req),
+    header: req.headers[Peer.PEER_HEADER],
+    secret: RemoteNew.loadSecret(INST.home),
+  });
+}
+
+/** Helper: POST /api/peerNew. Answers at once; the folder is made as a job (a preparing row in this
+ * computer's state) under this computer's Thoth folder, then the session starts. The caller never
+ * names a path here. The same request id starts nothing new: it answers that job's state. */
+async function handlePeerNew(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!fromOwnerPanel(req)) {
+    req.resume();
+    sendJson(res, 403, { error: 'Only the owner’s main panel can start a session on this computer' });
+    return;
+  }
+  let body: Body;
+  try {
+    body = await readBody(req, RemoteNew.MAX_BODY);
+  } catch {
+    sendJson(res, 413, { error: 'Request too large' });
+    return;
+  }
+  try {
+    const r = RemoteNew.parseRequest(body);
+    if (r.agent === 'codex') requireCodex();
+    const from = asText(body['from']).slice(0, 60);
+    const { job, fresh } = newJobs.start(r.requestId, { name: r.name, agent: r.agent }, async (signal) => {
+      await poll();
+      signal.throwIfAborted();
+      const projects = Heartbeat.findProjects(HOME, [...new Set(snapshot.sessions.map((x) => x.folder))]);
+      const workRoot = path.join(INST.home, 'remote-work');
+      const p = await RemoteNew.prepare({ workRoot, projects, req: r, signal });
+      // nobody sits at the helper: Claude must not stop at its folder-trust question (lib/trust.ts)
+      if (r.agent === 'claude')
+        try {
+          Trust.trustFolder({ folder: p.start, workRoot });
+        } catch (e) {
+          console.log(`remote new: ${p.start} not marked trusted: ${errMsg(e)}`);
+        }
+      const id = await createWindow({
+        name: (r.name || path.basename(p.folder)).slice(0, 30),
+        folder: p.start,
+        sid: '',
+        run: true,
+        agent: r.agent,
+      });
+      console.log(`remote new: ${id} in ${p.start} (${p.from}, ${p.branch})`);
+      const message = RemoteNew.sessionMessage(p, r, from);
+      if (message)
+        void poll()
+          .then(() => deliver(id, message, null))
+          .catch((e: unknown) => {
+            console.log(`remote new: ${id}: the request was not delivered: ${errMsg(e)}`);
+          });
+      return id;
+    });
+    sendJson(res, 200, { requestId: job.requestId, state: job.state, error: job.error, fresh });
+  } catch (e) {
+    sendJson(res, 400, errorReply(e));
+  }
+}
+
+/** Helper: POST /api/peerCancel {requestId} from the owner's main panel: the preparing row is closed;
+ * its git processes stop and the folder it made is removed (lib/remote_new.ts prepare). */
+async function handlePeerCancel(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!fromOwnerPanel(req)) {
+    req.resume();
+    sendJson(res, 403, { error: 'Only the owner’s main panel can do this' });
+    return;
+  }
+  try {
+    const body = await readBody(req, 4096);
+    const cancelled = newJobs.cancel(asText(body['requestId']));
+    sendJson(res, 200, { cancelled });
+  } catch {
+    sendJson(res, 400, { error: 'Bad request' });
+  }
+}
+
+// ---------- fetch result (lib/fetch_result.ts; multi-device plan PR 7) ----------
+/** Main panel: fetchResult {id, fetchId?} starts taking back a helper session's work (answers at once
+ * with the fetch id; the row's `fetch` field shows the progress); fetchCancel {id} stops it. */
+function fetchAction(name: string, args: Json, req: http.IncomingMessage): Json {
+  const session = asText(args['id']);
+  Fetch.mayFetch({ fromThisMac: fromThisMac(req), viaRemote: viaRemote.has(req), session });
+  if (name === 'fetchCancel') {
+    const f = fetchJobs.latest(session);
+    return { cancelled: f ? fetchJobs.cancel(f.fetchId) : false };
+  }
+  const rid = Peer.parseRemoteId(session);
+  if (!rid || !peerSet.get(rid.device))
+    throw new Error(`${rid?.device ?? 'This computer'} is not one of your helper computers`);
+  const given = asText(args['fetchId']);
+  const fetchId = Fetch.FETCH_ID.test(given) ? given : Fetch.newFetchId();
+  const { job } = fetchJobs.start(fetchId, session, (signal, step) =>
+    fetchWork(rid.device, rid.id, fetchId, signal, step),
+  );
+  return { fetchId: job.fetchId, state: job.state };
+}
+
+/** Main panel: the steps of one fetch (see the top of lib/fetch_result.ts). */
+async function fetchWork(
+  device: string,
+  win: string,
+  fetchId: string,
+  signal: AbortSignal,
+  step: (text: string) => void,
+): Promise<Fetch.FetchResult> {
+  const p = peerSet.get(device);
+  if (!p) throw new Error(`${device} is not one of your helper computers`);
+  const ask = async (method: string, apiPath: string, body?: unknown): Promise<Json> => {
+    let r: Peer.Reply;
+    try {
+      r = await p.request(method, apiPath, body);
+    } catch (e) {
+      throw new Error(`${device} does not answer: ${errMsg(e)}`, { cause: e });
+    }
+    signal.throwIfAborted();
+    let j: Json = {};
+    try {
+      j = asObj(JSON.parse(r.body.toString())) ?? {};
+    } catch {
+      /* not JSON */
+    }
+    if (r.status !== 200) throw new Error(`${device}: ${asText(j['error']) || `answered ${String(r.status)}`}`);
+    return j;
+  };
+  step(`Reading the session on ${device}`);
+  const info = await ask('POST', '/api/peerFetchInfo', { win });
+  // values from the helper are checked before git sees them
+  const roots = (Array.isArray(info['roots']) ? info['roots'] : []).map(Fetch.checkSha).filter(Boolean).slice(0, 5);
+  if (!Fetch.checkSha(info['head'])) throw new Error(`${device} named no valid commit`);
+  const remote = asText(info['remote']);
+  step('Finding the project on this Mac');
+  // the repo this Mac started the session from first, then this Mac's projects
+  const row = p.view().sessions.find((x) => x.id === win);
+  sessionLinks ??= Fetch.loadLinks(LINKS_FILE);
+  const prefer = row
+    ? Fetch.sourceOf(Fetch.loadSources(SOURCES_FILE), sessionLinks, {
+        id: Peer.remoteId(device, win),
+        folder: row['folder'],
+        request: row['request'],
+      })
+    : '';
+  const folders = [...snapshot.sessions.map((x) => x.folder), ...recentFolders().map((x) => x.folder)];
+  const projects = Heartbeat.findProjects(HOME, [...new Set(folders)]);
+  const repo = await Fetch.pickRepo(projects, { remote, roots }, signal, prefer);
+  if (repo === null)
+    throw new Error(
+      remote
+        ? `No project on this Mac has the git remote ${remote}`
+        : 'No project on this Mac shares history with the helper session',
+    );
+  const name = asText(p.view().sessions.find((x) => x.id === win)?.['name']);
+  const branch = Fetch.branchName(device, name, win);
+  let head = asText(info['head']),
+    dirty = Number(info['dirty']) || 0,
+    file = '',
+    ref = '',
+    asked = false;
+  const here = await RemoteNew.git(['cat-file', '-e', `${head}^{commit}`], { cwd: repo, signal }).then(
+    () => true,
+    () => false,
+  );
+  try {
+    if (!here) {
+      step(`Making a git bundle on ${device}`);
+      asked = true;
+      await ask('POST', '/api/peerFetch', { fetchId, win, have: await Fetch.haves(repo, signal) });
+      let s: Json;
+      for (;;) {
+        s = await ask('GET', `/api/peerFetch?fetchId=${fetchId}`);
+        const state = asText(s['state']);
+        if (state === 'ready') break;
+        if (state === 'failed') throw new Error(`${device}: ${asText(s['error'])}`);
+        if (state !== 'making') throw new Error(`${device} lost the fetch (did it restart?): fetch again`);
+        await Fetch.pause(1000, signal);
+      }
+      head = Fetch.checkSha(s['head']);
+      dirty = Number(s['dirty']) || 0;
+      ref = asText(s['ref']);
+      if (!head || (ref !== '' && !Fetch.validRef(ref))) throw new Error(`${device} sent a bad commit or ref`);
+      if (ref) {
+        step(`Copying the bundle from ${device} (${String(Math.max(1, Math.round(Number(s['size']) / 1024)))} KB)`);
+        let r: Peer.Reply;
+        try {
+          r = await p.request('GET', `/api/peerFetchData?fetchId=${fetchId}`);
+        } catch (e) {
+          throw new Error(`${device} does not answer: ${errMsg(e)}`, { cause: e });
+        }
+        signal.throwIfAborted();
+        if (r.status !== 200) throw new Error(`${device} did not send the bundle (${String(r.status)})`);
+        if (r.body.length > Fetch.MAX_BUNDLE) throw new Error('The bundle is too large');
+        const dir = path.join(INST.home, 'tmp');
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        file = path.join(dir, `fetch-${fetchId}.bundle`);
+        fs.writeFileSync(file, r.body, { mode: 0o600 });
+      }
+    }
+    step(`Adding the branch ${branch}`);
+    const a = await Fetch.applyResult({
+      repo,
+      file,
+      ref,
+      head,
+      branch,
+      id: fetchId,
+      message: `thoth: fetch result from ${device}`,
+      signal,
+    });
+    console.log(`fetch result: ${device} ${win} -> ${repo} ${a.branch} ${a.commit.slice(0, 12)} (${a.how})`);
+    return { ...a, repo, dirty };
+  } finally {
+    if (file) fs.rmSync(file, { force: true });
+    if (asked) void p.request('POST', '/api/peerFetchDone', { fetchId }).catch(() => undefined);
+  }
+}
+
+/** Helper: the "Fetch result" requests of the owner's main panel (same checks as /api/peerNew). Each
+ * answers at once; the bundle is made as a job (lib/fetch_result.ts). */
+async function handlePeerFetch(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+  if (!fromOwnerPanel(req)) {
+    req.resume();
+    sendJson(res, 403, { error: 'Only the owner’s main panel can do this' });
+    return;
+  }
+  const folderOf = (win: string): string => {
+    const s = snapshot.sessions.find((x) => x.id === win);
+    if (!s || !isDir(s.folder)) throw new Error('No such session');
+    return s.folder;
+  };
+  try {
+    const route = `${req.method ?? 'GET'} ${url.pathname}`;
+    if (route === 'POST /api/peerFetchInfo') {
+      const body = await readBody(req, 4096);
+      sendJson(res, 200, { ...(await Fetch.repoInfo(folderOf(Fetch.parseWin(body['win'])))) });
+      return;
+    }
+    if (route === 'POST /api/peerFetch') {
+      const r = Fetch.parseFetchRequest(await readBody(req, 64 * 1024));
+      const folder = folderOf(r.win);
+      const file = path.join(INST.home, 'tmp', `result-${r.fetchId}.bundle`);
+      const job = makeJobs.start(r.fetchId, file, (signal) => Fetch.makeBundle({ folder, have: r.have, file, signal }));
+      sendJson(res, 200, Fetch.makeView(job));
+      return;
+    }
+    const fetchId = url.searchParams.get('fetchId') ?? '';
+    if (route === 'GET /api/peerFetch') {
+      sendJson(res, 200, Fetch.makeView(makeJobs.get(fetchId)));
+      return;
+    }
+    if (route === 'GET /api/peerFetchData') {
+      const job = makeJobs.get(fetchId);
+      if (job?.state !== 'ready' || (job.made?.ref ?? '') === '' || !fs.existsSync(job.file)) {
+        sendJson(res, 404, { error: 'No bundle for this fetch' });
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(fs.statSync(job.file).size),
+      });
+      fs.createReadStream(job.file).pipe(res);
+      return;
+    }
+    if (route === 'POST /api/peerFetchDone') {
+      const body = await readBody(req, 4096);
+      sendJson(res, 200, { done: makeJobs.done(asText(body['fetchId'])) });
+      return;
+    }
+    sendJson(res, 404, { error: 'Unknown path' });
+  } catch (e) {
+    sendJson(res, 400, errorReply(e));
   }
 }
 

@@ -147,6 +147,8 @@
             <svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true"><path d="M5.5 3.5v13l11-6.5z" fill="currentColor"/></svg><span>Resume</span></button>
           <button id="a-stop" class="btn" type="button" data-testid="detail.stop">
             <svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="2" fill="currentColor"/></svg>Stop</button>
+          <button id="a-fetch" class="btn hidden" type="button" title="Take the committed work of this session to this Mac as a branch helper/&lt;computer&gt;/&lt;name&gt;. Your checkout does not change." data-testid="detail.fetch">
+            <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><circle cx="10" cy="10" r="7.3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 6v7M7 10.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Fetch Result</span></button>
           <button id="a-finder" class="btn icon" type="button" title="Show in Finder" aria-label="Show in Finder" data-testid="detail.finder">
             <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.6 1.8H16a1.5 1.5 0 0 1 1.5 1.5v7.2a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></button>
           <button id="a-code" class="btn" type="button" data-testid="detail.code">
@@ -287,6 +289,7 @@
       <div class="ad-copy-row">
         <button id="ad-copy" class="btn" type="button" data-testid="addDevice.copy">
           <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><rect x="6.5" y="6.5" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M13.5 6.5V5a1.5 1.5 0 0 0-1.5-1.5H5A1.5 1.5 0 0 0 3.5 5v7A1.5 1.5 0 0 0 5 13.5h1.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Copy Command</span></button>
+        <button id="ad-prompt" class="btn hidden" type="button" title="On a Mac with Claude Code: paste this prompt into Claude Code there. It installs Thoth, joins with this code, keeps the Mac on and checks the result." data-testid="addDevice.copyPrompt"><span>Copy Prompt for Claude Code</span></button>
         <span id="ad-note" class="ad-note" data-testid="addDevice.note"></span>
       </div>
     </div>
