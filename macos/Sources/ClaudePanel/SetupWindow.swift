@@ -116,7 +116,8 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, WKNavig
             if done == true, self.mode == .firstRun, !self.loaded { self.finish(); return }
             if done != nil { self.loadPage(); return }
             if Date() > deadline {
-                self.showError("The server on port \(Backend.shared.port) did not answer after 30 seconds. Copy the diagnostics and send them to whoever helps you with Thoth.")
+                self.showError(Backend.shared.serverNote.map { "The server on port \(Backend.shared.port) does not answer. \($0)" }
+                    ?? "The server on port \(Backend.shared.port) did not answer after 30 seconds. Copy the diagnostics and send them to whoever helps you with Thoth.")
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in self?.waitForServer(deadline: deadline) }

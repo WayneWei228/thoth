@@ -164,6 +164,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    /// A join request's notification: the server sends one `joinNotice` per request id (lib/join_requests.ts
+    /// Notices), also when the app is in front: the owner may not look at the sidebar.
+    func notifyJoin(_ j: JoinRequest) {
+        let title = String(j.title.prefix(80))
+        let body = String((j.notice ?? j.system).prefix(200))
+        // a test instance shows no notifications: it writes them to a file for the check
+        if Instance.isTest {
+            let line = "\(Date().timeIntervalSince1970)\t\(j.id)\t\(title)\t\(body)\n"
+            let path = Instance.home + "/notifications.log"
+            if let h = FileHandle(forWritingAtPath: path) { h.seekToEndOfFile(); h.write(Data(line.utf8)); h.closeFile() }
+            else { FileManager.default.createFile(atPath: path, contents: Data(line.utf8)) }
+            return
+        }
+        guard notificationsAvailable else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.userInfo = ["join": j.id]
+        let key = String(j.id.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }.prefix(64))
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "join-" + key, content: content, trigger: nil))
+    }
+
+    /// A join request's notification shows as a banner also when Thoth is in front.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done(notification.request.content.userInfo["join"] != nil ? [.banner, .sound] : [])
+    }
+
     private func post(_ title: String, _ body: String, id: String) {
         guard notificationsAvailable, !NSApp.isActive else { return }
         let content = UNMutableNotificationContent()
@@ -175,7 +203,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
-        if let id = response.notification.request.content.userInfo["id"] as? String {
+        if response.notification.request.content.userInfo["join"] != nil {
+            // the request is at the top of the sidebar
+            DispatchQueue.main.async {
+                Instance.activate()
+                self.window.showWindow(nil)
+            }
+        } else if let id = response.notification.request.content.userInfo["id"] as? String {
             DispatchQueue.main.async {
                 Instance.activate()
                 self.window.showWindow(nil)

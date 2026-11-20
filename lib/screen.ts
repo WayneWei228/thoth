@@ -195,3 +195,52 @@ export function inputBoxText(screen: string): string {
   // an empty box shows a dim placeholder hint such as: Try "write a test for <filepath>"
   return /^Try ".*"$/.test(text) ? '' : text;
 }
+
+/**
+ * Text in Claude Code's input box that was typed (or pasted) but never sent, from `tmux capture-pane
+ * -p -e` (with the escape codes, without -J), or ''. When the box is empty, Claude Code shows a prompt
+ * suggestion there in dim text (ESC[2m); that is not a draft. The box is the part between the last two
+ * rules; its text starts after "❯ ". A draft has at least one character that is not dim.
+ */
+export function draftText(screen: string): string {
+  // OSC sequences (hyperlinks: ESC ] … ESC \ or BEL) carry no text
+  const text = screen.replaceAll(new RegExp(String.raw`${ESC}\][^\u0007${ESC}]*(?:\u0007|${ESC}\\)`, 'g'), '');
+  const sgr = new RegExp(String.raw`${ESC}\[([\d;:]*)m|${ESC}\[[\d;?]*[A-Za-z]`, 'y');
+  // every line as characters with their dim flag (tmux carries the attributes across lines)
+  const lines: { ch: string; dim: boolean }[][] = [[]];
+  let dim = false;
+  for (let i = 0; i < text.length;) {
+    sgr.lastIndex = i;
+    const m = sgr.exec(text);
+    if (m) {
+      const params = (m[1] ?? 'x').split(';');
+      for (let k = 0; k < params.length; k++) {
+        const p = params[k] ?? '';
+        if (p === '' || p === '0' || p === '22') dim = false;
+        else if (p === '2') dim = true;
+        else if (/^[345]8$/.test(p)) k += params[k + 1] === '5' ? 2 : params[k + 1] === '2' ? 4 : 0; // a colour, not attributes
+      }
+      i += m[0].length;
+      continue;
+    }
+    const ch = String.fromCodePoint(text.codePointAt(i) ?? 0);
+    if (ch === '\n') lines.push([]);
+    else lines.at(-1)?.push({ ch, dim });
+    i += ch.length;
+  }
+  const plain = lines.map((l) => l.map((c) => c.ch).join(''));
+  const rules = plain.flatMap((l, i) => (/^─{10,}/.test(l.trim()) ? [i] : []));
+  const end = rules.at(-1) ?? -1;
+  const start = rules.at(-2) ?? -1;
+  if (start < 0) return '';
+  const cells = lines.slice(start + 1, end).flatMap((l, i) => (i ? [{ ch: ' ', dim: false }, ...l] : l));
+  const at = cells.findIndex((c) => c.ch === '❯');
+  if (at < 0) return '';
+  const rest = cells.slice(at + 1);
+  if (!rest.some((c) => !c.dim && c.ch.trim() !== '')) return '';
+  return rest
+    .map((c) => c.ch)
+    .join('')
+    .replaceAll(/\s+/g, ' ')
+    .trim();
+}

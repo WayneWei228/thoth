@@ -23,6 +23,8 @@ import * as Codex from './lib/codex.ts';
 import * as Copies from './lib/copies.ts';
 import * as DevicePick from './lib/device_pick.ts';
 import * as Devices from './lib/devices.ts';
+import * as Joins from './lib/join_requests.ts';
+import { BrainEvents } from './lib/brain_events.ts';
 import { readRecords, outsideHolders, paneSessions, paneRunning, isBlocked, migrationPlan } from './lib/elsewhere.ts';
 import * as Firewall from './lib/firewall.ts';
 import { highlight } from './lib/highlight.ts';
@@ -32,6 +34,7 @@ import * as HookState from './lib/hookstate.ts';
 import { instance as makeInstance, guardedFolder } from './lib/instance.ts';
 import * as Media from './lib/media.ts';
 import * as Pairing from './lib/pairing.ts';
+import * as Paste from './lib/paste.ts';
 import * as Peer from './lib/peer.ts';
 import * as Permissions from './lib/permissions.ts';
 import * as PermNeed from './lib/permneed.ts';
@@ -40,8 +43,10 @@ import * as Remote from './lib/remote.ts';
 import * as RemoteNew from './lib/remote_new.ts';
 import { createRemoteListeners } from './lib/remote_listen.ts';
 import * as Restore from './lib/restore.ts';
+import * as SelfUpdate from './lib/self_update.ts';
 import * as router from './lib/router.ts';
-import { parseScreen, ANSI, inputBoxText, type MenuOption } from './lib/screen.ts';
+import { parseScreen, ANSI, inputBoxText, draftText, type MenuOption } from './lib/screen.ts';
+import * as Asks from './lib/asks.ts';
 import * as Setup from './lib/setup.ts';
 import * as SetupFix from './lib/setup_fix.ts';
 import * as SetupOutside from './lib/setup_outside.ts';
@@ -111,6 +116,28 @@ function tmux(args: string[]): Promise<string | null> {
     });
   });
 }
+// tmux with `input` on its standard input (load-buffer -)
+function tmuxIn(args: string[], input: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = execFile('tmux', [...INST.tmuxArgs, ...args], (err, out) => {
+      resolve(err ? null : out);
+    });
+    // tmux that exits before reading its input (no server, bad socket) gives EPIPE here; the callback
+    // above already resolves null, and an unhandled 'error' would stop this server
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(input);
+  });
+}
+// Put `text` into the input box of window `id`: typed keys, or one bracketed paste for a long
+// Claude message (typed keys lose its head; lib/paste.ts). null when tmux failed.
+async function typeText(id: string, text: string, agent: Agent): Promise<string | null> {
+  if (Paste.inputMethod(text, agent) === 'type') return tmux(['send-keys', '-t', id, '-l', '--', text]);
+  const buffer = `thoth-paste-${crypto.randomBytes(6).toString('hex')}`;
+  if ((await tmuxIn(['load-buffer', '-b', buffer, '-'], Paste.forPaste(text))) === null) return null;
+  const out = await tmux(['paste-buffer', '-p', '-d', '-b', buffer, '-t', id]);
+  if (out === null) await tmux(['delete-buffer', '-b', buffer]);
+  return out;
+}
 function tmuxSync(args: string[]): string | null {
   try {
     return execFileSync('tmux', [...INST.tmuxArgs, ...args], { encoding: 'utf8' });
@@ -118,6 +145,8 @@ function tmuxSync(args: string[]): string | null {
     return null;
   }
 }
+// windows whose Claude the panel started and that have not sent SessionStart yet (lib/hookstate.ts)
+const startGate = HookState.createStartGate();
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => {
     setTimeout(r, ms);
@@ -242,12 +271,11 @@ function brainSessionFiles(): { mcp: string; settings: string } | null {
 async function startClaude(id: string, sid: string): Promise<void> {
   // brain files when the brain is in use; a test instance also turns Remote Control off (lib/claude_args.ts)
   // + the state hooks (lib/hookstate.ts): Claude reports its state to /api/hook (CC_PANEL_NO_HOOKS turns them off)
-  const extra = claudeArgs(
-    env('CC_PANEL_NO_BRAIN') ? null : brainSessionFiles(),
-    INST,
-    env('CC_PANEL_NO_HOOKS') ? null : stateHooks(PORT),
-  );
+  const hooks = env('CC_PANEL_NO_HOOKS') ? null : stateHooks(PORT);
+  const extra = claudeArgs(env('CC_PANEL_NO_BRAIN') ? null : brainSessionFiles(), INST, hooks);
   const cmd = (sid ? `claude --resume ${sid}` : 'claude') + extra;
+  // the queue types nothing into this window until Claude's SessionStart hook (lib/hookstate.ts)
+  if (hooks) startGate.starting(id);
   await tmux(['send-keys', '-t', id, 'C-u']);
   await tmux(['send-keys', '-t', id, '-l', '--', cmd]);
   await tmux(['send-keys', '-t', id, 'Enter']);
@@ -484,7 +512,12 @@ interface Session {
   title: string;
   activity: number;
   ask?: { tool: string; detail: string };
+  /** An idle session that waits for the owner (lib/asks.ts): its last reply asks a question, or its
+   * input box holds text that was never sent. The state stays 'idle' (the router and the delivery
+   * queue may send to it); the panels show it like 'needs', with this text and no option buttons. */
+  waits?: Waits;
 }
+type Waits = Asks.Waits;
 interface Snapshot {
   sessions: Session[];
   ts: number;
@@ -500,9 +533,15 @@ let snapshot: Snapshot = { sessions: [], ts: 0 };
 // the owner's helper computers (lib/peer.ts): their sessions join the state message
 const peerSet = Peer.createPeerSet({
   onChange: () => {
+    // an update of a helper is done when its state shows the new commit (lib/self_update.ts)
+    for (const v of peerSet.views()) updateJobs.follow(v.device, v.build ?? null, v.update ?? null);
     linkHelperSessions();
     broadcast();
   },
+});
+// helper updates (lib/self_update.ts). Main Mac: one job per helper; helper: its update.json.
+const updateJobs = SelfUpdate.createJobs(() => {
+  broadcast();
 });
 // new sessions on a helper computer still preparing (lib/remote_new.ts). Main Mac: the brief and the
 // bundle, until the helper has the request. Helper: the folder, until the session starts.
@@ -515,6 +554,26 @@ const fetchJobs = Fetch.createFetchJobs(() => {
   broadcast();
 });
 const makeJobs = Fetch.createMakeJobs();
+const THOTH_VERSION = ((): string => {
+  const v = (Devices.readJson(path.join(ROOT, 'package.json')) as { version?: unknown } | null)?.version;
+  return typeof v === 'string' ? v : '';
+})();
+// the commit this copy runs (git, or the BUILD file of a downloaded copy): the main Mac compares its
+// helpers' builds with its own and offers to update an older one (lib/self_update.ts)
+const OWN_BUILD = SelfUpdate.readBuild(ROOT, THOTH_VERSION);
+console.log(`build: ${THOTH_VERSION} ${OWN_BUILD.commit.slice(0, 12) || '(commit not known)'}`);
+// a helper that an update restarted: done when it runs the new commit, else failed (shown on the main Mac)
+{
+  const before = SelfUpdate.readStatus(INST.home);
+  const after = SelfUpdate.settleAfterStart(before, OWN_BUILD);
+  if (after && after !== before) {
+    SelfUpdate.writeStatus(INST.home, after);
+    console.log(`update ${after.id}: ${after.state}${after.error ? ` (${after.error})` : ''}`);
+  }
+}
+// the helper's update status, read again at most once a second (the update script writes it)
+const updateCache = SelfUpdate.statusReader(INST.home);
+const updateStatus = (): SelfUpdate.Status | null => updateCache.get();
 const SOURCES_FILE = path.join(INST.home, 'remote-sources.json');
 const LINKS_FILE = path.join(INST.home, 'remote-session-sources.json');
 let sessionLinks: Record<string, Fetch.Link> | null = null; // LINKS_FILE, read once
@@ -550,6 +609,8 @@ function linkHelperSessions(): void {
   }
 }
 Fetch.cleanBundles(path.join(INST.home, 'tmp')); // bundles of fetches a restart cut off
+const REQUESTS_FILE = path.join(INST.home, 'remote-requests.json');
+const SAVED_REQUESTS = RemoteNew.loadSaved(REQUESTS_FILE); // helper: the request ids from before a restart
 const newJobDevice = new Map<string, string>(); // main: request id -> the helper it goes to
 const newJobSeen = new Set<string>(); // main: the request ids the helper's state has shown
 // main: these jobs survive a server restart (lib/remote_new.ts loadPending): a preparing row comes
@@ -575,7 +636,10 @@ function savePendingNew(): void {
 }
 /** The state message: this Mac's sessions, then each helper's (id r:<device>:<window>, `device`,
  * `offline`), and the preparing rows of new sessions on helpers. */
-function stateOut(): Omit<Snapshot, 'sessions'> & { sessions: object[] } {
+function stateOut(): ReturnType<typeof sessionsOut> & { joins: Joins.JoinRequest[] } {
+  return { ...sessionsOut(), joins };
+}
+function sessionsOut(): Omit<Snapshot, 'sessions'> & { sessions: object[] } & Record<string, unknown> {
   const views = peerSet.views();
   // helper: its preparing rows; a session a request started carries the request id (`request`)
   const own = newJobs
@@ -584,12 +648,15 @@ function stateOut(): Omit<Snapshot, 'sessions'> & { sessions: object[] } {
     .map((j) => RemoteNew.jobRow(j));
   const local: object[] = [
     ...snapshot.sessions.map((x) => {
-      const request = newJobs.requestOf(x.id);
+      // a session started by a request: also after a restart of this server (an update)
+      const request = newJobs.requestOf(x.id) || RemoteNew.savedRequest(SAVED_REQUESTS, x.id, x.folder);
       return request ? { ...x, request } : x;
     }),
     ...own,
   ];
-  if (!views.length) return { ...snapshot, sessions: local };
+  // this computer's Thoth build and (a helper) its last update; the main panel's helper list
+  const extra = { build: OWN_BUILD, update: SelfUpdate.statusView(updateStatus()), peers: peersView() };
+  if (!views.length) return { ...snapshot, ...extra, sessions: local };
   // main: a helper session's newest "Fetch result" (lib/fetch_result.ts) as its `fetch` field
   const merged: object[] = Peer.mergeSessions(local, views).map((x) => {
     const f = fetchJobs.latest(x.id);
@@ -615,7 +682,7 @@ function stateOut(): Omit<Snapshot, 'sessions'> & { sessions: object[] } {
       offline: !(view?.online ?? false),
     });
   }
-  return { ...snapshot, sessions: merged };
+  return { ...snapshot, ...extra, sessions: merged };
 }
 const prevState = new Map<string, string>();
 
@@ -636,6 +703,10 @@ const hookRecs = new Map<string, HookRec>(
   ),
 );
 const idleSince = new Map<string, number>(); // window id -> since when the screen has shown 'idle' (ms)
+// window id -> the input box text (plain), its draft (draftText) and since when the box shows it
+const boxSeen = new Map<string, Asks.BoxSeen>();
+// windows the panel is typing a message into now: their input box text is the panel's, not a draft
+const typingInto = new Set<string>();
 const paneWindow = new Map<string, string>(); // tmux pane id (%N) -> window id, from poll()
 let hookSave: NodeJS.Timeout | undefined;
 function saveHookRecs(): void {
@@ -678,6 +749,7 @@ async function onHook(event: string, pane: string, payload: HookPayload): Promis
   let id = paneWindow.get(pane) ?? '';
   if (!id) id = ((await tmux(['display-message', '-p', '-t', pane, '#{window_id}'])) ?? '').trim();
   if (!/^@\d+$/.test(id)) return;
+  startGate.hook(id, event);
   if (event === 'UserPromptSubmit') {
     // Claude got the prompt; its prompt hooks run now (the brain's takes seconds)
     const e = (echoes.get(id) ?? []).find((x) => x.phase === 'sending');
@@ -702,11 +774,14 @@ interface TInfo {
   mtime: number;
   lastMsg: number;
   busy?: boolean;
+  /** the question the reply that ended the last turn asks the owner, or '' (lib/asks.ts) */
+  asks?: string;
 }
 
 async function poll(): Promise<void> {
   const fmt =
     '#{window_id}\t#{window_index}\t#{window_name}\t#{pane_current_command}\t#{pane_current_path}\t#{@folder}\t#{@sid}\t#{window_activity}\t#{@label}\t#{pane_pid}\t#{@created}\t#{@agent}\t#{@started}\t#{pane_id}';
+  const listedAt = Date.now();
   const out = await tmux(['list-windows', '-t', S, '-F', fmt]);
   if (out === null) {
     // the tmux session is gone while the server runs (tmux crashed or was killed): build the
@@ -797,6 +872,12 @@ async function poll(): Promise<void> {
     if (state === 'idle') {
       if (!idleSince.has(id)) idleSince.set(id, Date.now());
     } else idleSince.delete(id);
+    // a window held for its SessionStart hook: "No, exit" at the trust prompt or a lost hook ends it
+    const released = startGate.poll(id, { running, idleSince: idleSince.get(id) ?? 0 });
+    if (released) console.log(`delivery: ${id}: typing allowed (${released})`);
+    // the agent ended before it was ready ("No, exit" at the trust prompt): its queued messages fail
+    // here, so the queue does not start it again and again in a folder the user did not trust
+    if (released === 'the agent process ended') failPending(id, 'Claude exited before it was ready; not sent');
     let hooked: boolean;
     let ask: { tool: string; detail: string } | null = null;
     {
@@ -838,6 +919,9 @@ async function poll(): Promise<void> {
       live = live || 'Working';
     }
     if (tinfo && (!last || !running)) last = tinfo.reply || last;
+    let waits: Waits | null = null;
+    if (state === 'idle' && !blocked && agent !== 'codex') waits = await waitsOf(id, screen, tinfo);
+    else boxSeen.delete(id); // a box seen again later starts its SETTLE_MS again
     sessions.push({
       id,
       index: Number(index),
@@ -859,9 +943,12 @@ async function poll(): Promise<void> {
       // output or transcript bookkeeping. Opening or viewing a session must not move it.
       activity: lastMessageTime(tinfo, created),
       ...(ask && !blocked ? { ask } : {}),
+      ...(waits ? { waits } : {}),
     });
     prevState.set(id, state);
   }
+  startGate.keep(new Set(sessions.map((x) => x.id)), listedAt);
+  for (const k of boxSeen.keys()) if (!sessions.some((x) => x.id === k)) boxSeen.delete(k);
   snapshot = {
     sessions,
     ts: Date.now(),
@@ -878,6 +965,24 @@ async function poll(): Promise<void> {
   void flushPending();
 }
 
+/** What an idle Claude session waits for from the owner (Session.waits), or null (lib/asks.ts). The
+ * capture with escape codes runs only when Asks.needsCapture says so. */
+async function waitsOf(id: string, screen: string, tinfo: TInfo | null): Promise<Waits | null> {
+  const now = Date.now();
+  if (typingInto.has(id)) {
+    boxSeen.delete(id); // a long message can take longer than SETTLE_MS to type and send
+    return Asks.waitsFrom(undefined, tinfo?.asks ?? '', now);
+  }
+  const box = inputBoxText(screen);
+  const old = boxSeen.get(id);
+  const draft = Asks.needsCapture(old, box, now)
+    ? draftText((await tmux(['capture-pane', '-p', '-e', '-t', id])) ?? '')
+    : null;
+  const seen = Asks.seeBox(old, box, draft, now);
+  boxSeen.set(id, seen);
+  return Asks.waitsFrom(seen, tinfo?.asks ?? '', now);
+}
+
 // A fresh session gets its transcript id once Claude writes the file.
 
 // ---------- message delivery queue ----------
@@ -888,6 +993,14 @@ interface Pending {
   typedAt?: number;
 }
 const pending = new Map<string, Pending[]>(); // window id -> [{ text, routeId }]
+/** Drop the queued messages of window `id`: each one's request shows `error`. */
+function failPending(id: string, error: string): void {
+  const queue = pending.get(id);
+  if (!queue) return;
+  pending.delete(id);
+  for (const q of queue) setRoute(q.routeId, { status: 'error', error });
+  console.log(`delivery: ${id}: ${String(queue.length)} queued message(s) dropped: ${error}`);
+}
 const starting = new Set<string>();
 let flushing = false;
 async function flushPending(): Promise<void> {
@@ -911,6 +1024,13 @@ async function flushPending(): Promise<void> {
       }
       const q = queue[0];
       if (s.state !== 'idle' || !q) continue;
+      // typing would clear the owner's unsent text (lib/asks.ts), unless it is this message itself,
+      // typed or pasted before a menu came up: holding for it would stop the queue, and the owner's
+      // Enter plus the queue's retry would send it twice
+      if (Asks.holdsDraft(s) && !Paste.stillInBox(s.waits?.text ?? '', q.text)) continue;
+      // a Claude the panel just started (maybe right after the folder-trust prompt) that has not sent
+      // SessionStart yet: keys typed now are lost and can stop the window from reading keys at all
+      if (startGate.waiting(id)) continue;
       if (s.agent === 'codex') {
         // Codex shows its start-up menus (hook review, MCP) a few seconds after the input box: wait
         // 8 s after start. A message typed before such a menu is kept by Codex and runs after it, so
@@ -925,7 +1045,8 @@ async function flushPending(): Promise<void> {
         }
         q.typedAt = q.typedAt ?? Date.now();
       }
-      const result = await typeMessage(id, q.text, s.agent);
+      typingInto.add(id);
+      const result = await typeMessage(id, q.text, s.agent).finally(() => typingInto.delete(id));
       if (result === 'menu') {
         // a menu came up: leave the message queued; it is typed again once the session is idle
         // (typeMessage clears any text left in the input box first)
@@ -933,6 +1054,8 @@ async function flushPending(): Promise<void> {
       }
       queue.shift();
       if (!queue.length) pending.delete(id);
+      if (result !== 'sent' && q.routeId === null)
+        console.log(`delivery: ${id}: a queued message was typed but not taken`);
       setRoute(
         q.routeId,
         result === 'sent'
@@ -984,7 +1107,7 @@ async function typeMessage(id: string, text: string, agent: Agent = 'claude'): P
   if (agentOf(agent) !== 'codex' || boxText((await tmux(['capture-pane', '-p', '-J', '-t', id])) ?? '')) {
     await tmux(['send-keys', '-t', id, 'C-u']);
   }
-  await tmux(['send-keys', '-t', id, '-l', '--', one]);
+  await typeText(id, one, agentOf(agent));
   // A brand-new Claude draws its input box before it reads keys: the typed text shows up
   // 1–3 s later and an Enter sent before that is lost, while the box still looks empty, so it
   // looked "sent" (2026-11-10: 2 of 5 new sessions kept the request in the box until the user
@@ -1024,7 +1147,7 @@ async function typeMessage(id: string, text: string, agent: Agent = 'claude'): P
       continue;
     }
     echoed = true;
-    if (!one.startsWith(box.slice(0, 20)) && !box.includes(one.slice(0, 20))) return 'sent';
+    if (!Paste.stillInBox(box, one)) return 'sent';
   }
   return 'stuck';
 }
@@ -1038,7 +1161,11 @@ async function deliver(id: string, text: string, routeId: string | null): Promis
     pending.set(id, queue);
   }
   queue.push({ text, routeId });
-  setRoute(routeId, { status: s.state === 'idle' ? 'sending' : 'queued', target: id, targetName: s.name });
+  setRoute(routeId, {
+    status: s.state === 'idle' && !Asks.holdsDraft(s) ? 'sending' : 'queued',
+    target: id,
+    targetName: s.name,
+  });
   void flushPending();
 }
 
@@ -1386,10 +1513,6 @@ setTimeout(() => {
 // and the claude/codex checks run less often. After a 404 (an older brain) the same brain is asked
 // again in 10 minutes; after 401/403/429 (a refused token) in an hour (Heartbeat.waitAfter).
 // CC_PANEL_NO_BRAIN or CC_PANEL_NO_HEARTBEAT turn it off.
-const THOTH_VERSION = ((): string => {
-  const v = (readJson(path.join(ROOT, 'package.json')) as { version?: unknown } | null)?.version;
-  return typeof v === 'string' ? v : '';
-})();
 const beat = {
   projects: { at: 0, key: '\u0000', list: [] as Heartbeat.Project[] },
   tools: { at: 0, claude: false, codex: false },
@@ -1460,6 +1583,7 @@ async function sendHeartbeat(now: number = Date.now()): Promise<void> {
     claude: beat.tools.claude,
     codex: beat.tools.codex,
     version: THOTH_VERSION,
+    commit: OWN_BUILD.commit,
   });
   const target: BrainTarget = { cloud: true, url: new URL(t.url), token: t.token };
   try {
@@ -1601,6 +1725,7 @@ async function newWithBrief(
     agent = 'claude',
     named = '',
     project = folder,
+    ownApp = false,
   }: {
     folder: string;
     name?: string;
@@ -1612,15 +1737,54 @@ async function newWithBrief(
     named?: string;
     /** the project folder the router chose (may be a helper's path that is not on this Mac) */
     project?: string;
+    /** the request came from this Mac's own app or page (NewSessionPrefs.ownApp) */
+    ownApp?: boolean;
   },
 ): Promise<void> {
-  const patch = { ...patchIn, ...deviceNote(chooseDevice(named, project, agent), patchIn.reason) };
-  const id = await createWindow({ name: taskName(name, text), folder, sid: '', run: true, agent });
-  await poll();
-  if (sources.length && text) setRoute(rid, { ...patch, status: 'briefing', folder });
-  const { message, briefFrom } = await withBackground(text, sources);
-  setRoute(rid, { ...patch, status: 'queued', folder, briefFrom });
-  await deliver(id, message, rid);
+  const pick = chooseDevice(named, project, agent);
+  const sessionName = taskName(name, text);
+  await RemoteNew.startRouted({
+    device: pick.device,
+    peer: pick.device ? peerSet.get(pick.device)?.view() : undefined,
+    ownApp,
+    code: RemoteNew.routedCode({
+      project,
+      defaultFolder: defaultFolder(),
+      isDir,
+      isGit: (f) => gitRemoteOf(f) !== null,
+      named: pick.rule === 'named',
+      // the same path on any helper's list (the same remote is the same project)
+      helperRemote:
+        brainDevices.flatMap((d) => d.projects).find((p) => p.path === project && p.remote !== '')?.remote ?? '',
+      device: pick.device,
+    }),
+    // the helper: the same start as the New Session sheet (a preparing row at once; the brief and the
+    // code are a job)
+    remote: (code) => {
+      const r = startRemoteNew(
+        {
+          device: pick.device,
+          agent,
+          name: sessionName,
+          text: RemoteNew.routedText(pick.device, text),
+          folder: 'folder' in code ? code.folder : '',
+          context_from: sources.map((x) => x.id),
+        },
+        'remote' in code ? code.remote : '',
+      );
+      setRoute(rid, { ...patchIn, ...deviceNote(pick, patchIn.reason), ...RemoteNew.sentPatch(r.id, r.name) });
+      return r;
+    },
+    local: async (fallback) => {
+      const patch = { ...patchIn, ...deviceNote(pick, patchIn.reason, fallback) };
+      const id = await createWindow({ name: sessionName, folder, sid: '', run: true, agent });
+      await poll();
+      if (sources.length && text) setRoute(rid, { ...patch, status: 'briefing', folder });
+      const { message, briefFrom } = await withBackground(text, sources);
+      setRoute(rid, { ...patch, status: 'queued', folder, briefFrom });
+      await deliver(id, message, rid);
+    },
+  });
 }
 
 /** The computer for a new session (lib/device_pick.ts): the user's named one, the only one with the
@@ -1647,8 +1811,8 @@ function gitRemoteOf(folder: string): string | null {
   return config === null ? null : Heartbeat.remoteFromConfig(config);
 }
 /** The route fields for a device choice (lib/device_pick.ts routeNote). */
-function deviceNote(p: DevicePick.Pick, reason: string | undefined): RoutePatch {
-  const n = DevicePick.routeNote(p, reason ?? '');
+function deviceNote(p: DevicePick.Pick, reason: string | undefined, fallback = ''): RoutePatch {
+  const n = DevicePick.routeNote(p, reason ?? '', fallback);
   return { deviceChoice: n.device, deviceRule: n.rule, reason: n.reason };
 }
 
@@ -1692,6 +1856,9 @@ function codexDialogue(sid: string): Brief.Turn[] {
 interface NewSessionPrefs {
   folder?: string;
   agent?: string;
+  /** the request came from this Mac's own app or page (not a remote client or the relay): only such a
+   * request may start a session on a helper (RemoteNew.startRouted, the rule of routeNew) */
+  ownApp?: boolean;
 }
 /** Carry out one routing decision `d` for the request `text` (route record `rid`).
  * `prefs`: the folder and agent the user chose for a NEW session; a decision that sends the
@@ -1814,6 +1981,7 @@ async function runDecision(
       agent,
       sources: [target, ...contextFrom.filter((s) => s.id !== target.id)],
       named,
+      ownApp: prefs.ownApp === true,
       patch: {
         ...base,
         decided: 'auto-new-busy',
@@ -1841,6 +2009,7 @@ async function runDecision(
       sources: contextFrom,
       named,
       project,
+      ownApp: prefs.ownApp === true,
       patch: { ...base, decided: 'auto-new', agent: newAgent },
     });
   } else if (!testScope) {
@@ -1862,6 +2031,7 @@ async function runDecision(
       agent,
       named,
       project: chosen ? folder : project || folder,
+      ownApp: prefs.ownApp === true,
       patch: {
         ...base,
         folder,
@@ -2029,7 +2199,7 @@ function transcriptInfo(folder: string, sid: string): TInfo | null {
     if (!reply && j.type === 'assistant') reply = text.slice(0, 300);
     if (!prompt && j.type === 'user' && !/^<|^\[Request interrupted/.test(text)) prompt = text.slice(0, 200);
   }
-  const v = { reply, prompt, title, mtime: st.mtimeMs, lastMsg };
+  const v = { reply, prompt, title, mtime: st.mtimeMs, lastMsg, asks: Asks.questionOf(Asks.finalText(lines)) };
   tailCache.set(file, { mtime: st.mtimeMs, v });
   return v;
 }
@@ -2240,6 +2410,7 @@ async function cloudSetupView(
     },
   };
   let devices: ReturnType<typeof Devices.cloudView> | null = null;
+  const at = joinsGen.now();
   try {
     const r = await brainRequest('GET', '/api/devices', null, { timeout: 15000 });
     const list = deviceArray(r.json);
@@ -2247,6 +2418,7 @@ async function cloudSetupView(
       view.up = true;
       if (me) LOCAL_DEVICE = confDevice(me);
       devices = Devices.cloudView(list, { later: cloudLater(s), selfName: confDevice(me) });
+      setJoins(Joins.fromLists(devices), at);
     } else
       view.error =
         r.status === 401 || r.status === 403
@@ -2257,6 +2429,83 @@ async function cloudSetupView(
   }
   return { ...view, ...devices };
 }
+// Join requests for the sidebar (lib/join_requests.ts): the cloud brain's pending devices, pushed by
+// the brain over the event connection (brainEvents below), and from every GET /api/setup.
+let joins: Joins.JoinRequest[] = [];
+// a decision bumps it; a read that started before is dropped (it would bring the decided request back)
+const joinsGen = new Joins.Gen();
+// one `joinNotice` message per request id (the Mac app posts the notification); the ids are saved
+const JOIN_NOTICES_FILE = path.join(INST.home, 'join-notices.json');
+const savedNotices = readJson(JOIN_NOTICES_FILE);
+const joinNotices = new Joins.Notices(
+  (Array.isArray(savedNotices) ? (savedNotices as unknown[]) : []).map(String),
+  (ids) => {
+    try {
+      fs.writeFileSync(JOIN_NOTICES_FILE, JSON.stringify(ids));
+    } catch {
+      /* a lost list only repeats a notification */
+    }
+  },
+);
+function announceJoins(): void {
+  const open = [...stateClients].filter((ws) => ws.readyState === 1);
+  for (const join of joinNotices.take(joins, open.length > 0)) {
+    const msg = JSON.stringify({ type: 'joinNotice', join });
+    for (const ws of open) ws.send(msg);
+  }
+}
+function setJoins(list: Joins.JoinRequest[], at: number): void {
+  if (!joinsGen.fresh(at)) return;
+  if (Joins.key(list) !== Joins.key(joins)) {
+    joins = list;
+    broadcast();
+  }
+  announceJoins();
+}
+// the cloud brain pushes its device list over one outbound WebSocket (lib/brain_events.ts); no polling
+const brainEvents = new BrainEvents({
+  target: () => {
+    const loc = Setup.loadBrainLocation(INST.home);
+    return loc ? { url: new URL(loc.url), token: loc.owner_token } : null;
+  },
+  onDevices: (list) => {
+    lastDevices = list;
+    showPushedJoins();
+  },
+  log: (msg) => {
+    console.log(`brain events: ${msg}`);
+  },
+});
+// the newest pushed device list: a "Later" that runs out shows its request again from it (no network)
+let lastDevices: unknown[] = [];
+let laterTimer: NodeJS.Timeout | null = null;
+function showPushedJoins(): void {
+  const later = cloudLater(setupState());
+  setJoins(
+    Joins.fromLists(Devices.cloudView(lastDevices, { later, selfName: confDevice(cloudDevice()) })),
+    joinsGen.now(),
+  );
+  if (laterTimer) clearTimeout(laterTimer);
+  const wake = Joins.laterWake(later);
+  laterTimer = wake === null ? null : setTimeout(showPushedJoins, wake + 50);
+  laterTimer?.unref();
+}
+let brainEventsKey: string | null = null;
+/** The event connection to the brain in brain.json; opened again only when brain.json changed (the
+ * Setup page or `thoth setup --connect` in a terminal). Reads a local file, no network. */
+function ensureBrainEvents(): void {
+  const loc = Setup.loadBrainLocation(INST.home);
+  const key = loc ? `${loc.url}\u0000${loc.owner_token}` : '';
+  if (key === brainEventsKey) return;
+  brainEventsKey = key;
+  if (!loc) {
+    lastDevices = [];
+    setJoins([], joinsGen.now());
+  }
+  brainEvents.start();
+}
+setTimeout(ensureBrainEvents, 0).unref();
+setInterval(ensureBrainEvents, 30_000).unref();
 type ConnectLink = NonNullable<ReturnType<typeof Setup.parseConnectLink>>;
 type ConnectProblem = ReturnType<typeof Devices.connectError>;
 /** Check a connect link: health (is it a brain?) then an owner call (does it take the key?). */
@@ -2626,6 +2875,7 @@ const actions: Record<string, Action> = {
     Setup.setBrain(s, asText(b['device']));
     Setup.clearBrainLocation(INST.home); // a computer is the brain again: forget the cloud brain
     syncDeviceListener();
+    ensureBrainEvents();
   }),
   // step 3, cloud: paste the connect link; the panel checks it, keeps { url, owner_token } (0600),
   // and this computer joins the cloud brain and starts pushing its sessions
@@ -2633,6 +2883,7 @@ const actions: Record<string, Action> = {
     const r = await checkCloudLink(link);
     if ('fail' in r) throw fail(r.fail.error ?? '', 400, r.fail);
     Setup.saveBrainLocation(INST.home, { url: r.ok.url, owner_token: r.ok.token });
+    ensureBrainEvents();
     const s = setupState();
     Setup.setCloud(s, r.ok.host);
     try {
@@ -2663,6 +2914,8 @@ const actions: Record<string, Action> = {
         s['cloudLater'] = Object.fromEntries(Object.entries(cloudLater(s)).filter(([k]) => k !== id));
     } else throw new Error('Choose Approve, Ignore, Later, Unignore or Disconnect');
     Setup.save(INST.home, s);
+    joinsGen.bump(); // reads that started before this decision are dropped; setupView reads anew
+    if (decision === 'later') showPushedJoins(); // and the timer for when this Later runs out
     return setupView(s);
   },
   setupCloudCode({ name }) {
@@ -2963,10 +3216,11 @@ const actions: Record<string, Action> = {
   },
   // `folder`, `agent`: what the user chose for a NEW session (the phone's New task sheet). Used only
   // when the request starts a new session; a request that goes to an existing session ignores them.
-  route({ text: textIn, dry, attachments, folder, agent }) {
+  route(args) {
+    const { text: textIn, dry, attachments, folder, agent } = args;
     const text = withAttachments(textOrNull(textIn), attachments);
     if (!text) throw new Error('Empty request');
-    const prefs: NewSessionPrefs = {};
+    const prefs: NewSessionPrefs = { ownApp: ownAppArgs.has(args) };
     if (folder !== undefined && folder !== null && folder !== '') {
       if (typeof folder !== 'string' || !isDir(folder)) throw new Error('Folder not found');
       prefs.folder = folder;
@@ -3093,16 +3347,28 @@ const actions: Record<string, Action> = {
     const shown =
       asText(text).trim() ||
       (Array.isArray(attachments) ? attachments : []).map((p) => path.basename(asText(p))).join(' ');
+    // Claude is still starting (no SessionStart yet, e.g. right after the folder-trust prompt): keys
+    // typed now are lost, so the message waits in the queue and is typed once Claude is ready
+    if (HookState.sendMode(startGate, id) === 'queue') {
+      await deliver(id, full, null);
+      return { queued: true };
+    }
     const echo: Echo = { text: shown, at: Date.now(), phase: 'sending' };
     echoes.set(id, [...(echoes.get(id) ?? []), echo]);
-    const typed = await tmux(['send-keys', '-t', id, '-l', '--', full.replace(/\r?\n/g, ' ')]);
-    if (typed === null) {
+    // the box holds unsent text ("Not sent: …" in the panels): the owner's message replaces it
+    // (the owner's answer, PR #158)
+    const target = snapshot.sessions.find((x) => x.id === id);
+    if (target && Asks.holdsDraft(target)) await tmux(['send-keys', '-t', id, 'C-u']);
+    typingInto.add(id);
+    const typed = await typeText(id, full.replace(/\r?\n/g, ' '), agentOf(target?.agent)).finally(() =>
+      typingInto.delete(id),
+    );
+    if (typed === null)
       echoes.set(
         id,
         (echoes.get(id) ?? []).filter((x) => x !== echo),
       );
-      return {};
-    }
+    HookState.checkTyped(typed);
     await sleep(80);
     await tmux(['send-keys', '-t', id, 'Enter']);
     return {};
@@ -3329,6 +3595,9 @@ const LOCAL_ADDRESS = /^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/;
 const fromThisMac = (req: http.IncomingMessage): boolean => LOCAL_ADDRESS.test(req.socket.remoteAddress ?? '');
 /** Requests that came in through a remote listener or the relay (a remote client). */
 const viaRemote = new WeakSet<http.IncomingMessage>();
+/** The args of an action request from this Mac's own app or page (not through the relay): the
+ * router may start a session on a helper only for these (NewSessionPrefs.ownApp). */
+const ownAppArgs = new WeakSet<object>();
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${HOST}:${String(PORT)}`);
@@ -3425,6 +3694,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     await handlePeerCancel(req, res);
     return;
   }
+  // an update of this helper from the owner's main panel (lib/self_update.ts)
+  if (req.method === 'POST' && url.pathname === '/api/peerUpdate') {
+    await handlePeerUpdate(req, res);
+    return;
+  }
   // a helper session's result for the owner's main panel (lib/fetch_result.ts)
   if (url.pathname.startsWith('/api/peerFetch')) {
     await handlePeerFetch(req, res, url);
@@ -3457,6 +3731,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         if (tooLarge) return;
         const name = url.pathname.slice(5);
         // "Fetch result" of a helper session: only from this Mac's own app or page
+        // "Update <device>": only from this Mac's own app or page (lib/self_update.ts)
+        if (name === 'updateHelper') {
+          try {
+            const args = asObj(body ? JSON.parse(body) : {}) ?? {};
+            sendJson(res, 200, updateAction(args, req));
+          } catch (e) {
+            sendJson(res, 400, errorReply(e));
+          }
+          return;
+        }
         if (name === 'fetchResult' || name === 'fetchCancel') {
           try {
             const args = asObj(body ? JSON.parse(body) : {}) ?? {};
@@ -3485,6 +3769,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         try {
           const parsed: unknown = body ? JSON.parse(body) : {};
           const args = asObj(parsed) ?? {};
+          if (fromThisMac(req) && !viaRemote.has(req)) ownAppArgs.add(args);
           // a new session on a helper computer: only from this Mac's own app or page (routeNew)
           if (name === 'new') {
             const device = asText(args['device']);
@@ -3909,6 +4194,7 @@ wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     stateClients.add(ws);
     ws.send(JSON.stringify({ type: 'state', ...stateOut() }));
     ws.on('close', () => stateClients.delete(ws));
+    announceJoins(); // a join request that came while no panel listened
     return;
   }
   if (url.pathname === '/ws/term') {
@@ -4259,6 +4545,8 @@ async function peerAction(name: string, args: Json): Promise<{ status: number; j
     } catch {
       json = { error: `${d.device} answered ${String(r.status)}` };
     }
+    const older = SelfUpdate.olderHelperError(d.device, r.status, json);
+    if (older !== null) return { status: 400, json: { error: older } };
     return { status: Peer.replyStatus(r.status), json };
   } catch (e) {
     return { status: 502, json: { error: `${d.device} does not answer: ${errMsg(e)}` } };
@@ -4291,39 +4579,49 @@ async function peerRead(url: URL, res: http.ServerResponse): Promise<void> {
 
 // ---------- a new session on a helper computer (lib/remote_new.ts; multi-device plan PR 5) ----------
 /** The helpers this panel knows, for the new-session sheet's "Computer" choice (GET /api/peers). */
-function peersView(): { device: string; online: boolean }[] {
+function peersView(): { device: string; online: boolean; update: string; error: string; commit: string }[] {
   return peerSet
     .views()
-    .map((v) => ({ device: v.device, online: v.online }))
+    .map((v) => ({
+      device: v.device,
+      online: v.online,
+      // needed | updating | failed | '' (lib/self_update.ts peerStatus)
+      ...SelfUpdate.peerStatus(OWN_BUILD, v.build ?? null, updateJobs.get(v.device)),
+      commit: (v.build?.commit ?? '').slice(0, 12),
+    }))
     .toSorted((a, b) => a.device.localeCompare(b.device));
 }
 
 /** Main panel: POST /api/new with `device` = a helper (routeNew has checked who asks and that the
- * helper answers). Answers at once with the id of a preparing row; the work runs as a job (newJobs):
+ * helper answers), or the router's "new" decision for an online helper (newWithBrief). Answers at once with the id of a preparing row; the work runs as a job (newJobs):
  * the code of `folder` (a git project on this Mac) reaches the helper as described in
- * lib/remote_new.ts, and the session gets `text` with the background of the `context_from` sessions
+ * lib/remote_new.ts (no folder, or not a git project: an empty folder there), and the session gets `text` with the background of the `context_from` sessions
  * (this Mac's), like a local new session. The same `requestId` never starts a second session. */
-function startRemoteNew(body: Body): { id: string; requestId: string } {
+function startRemoteNew(body: Body, helperRemote = ''): { id: string; requestId: string; name: string } {
   const device = asText(body['device']);
   const p = peerSet.get(device);
   if (!p) throw new Error(`${device} is not one of your helper computers`);
   const agent = asText(body['agent']) || 'claude';
   if (!AGENTS.has(agent)) throw new Error('Unknown agent');
-  const folder = asText(body['folder']) || defaultFolder();
-  if (!isDir(folder)) throw new Error('Folder not found');
+  // no folder, or one outside a git repository: an empty folder on the helper (no code sent)
+  const folder = asText(body['folder']);
+  if (folder && !isDir(folder)) throw new Error('Folder not found');
   const given = asText(body['requestId']);
   const requestId = RemoteNew.REQUEST_ID.test(given) ? given : RemoteNew.newRequestId();
   const id = Peer.remoteId(device, RemoteNew.rowId(requestId));
   const known = newJobDevice.get(requestId);
   if (known !== undefined && known !== device) throw new Error('This request id was used for another computer');
   const text = asText(body['text']).trim();
-  const name = (asText(body['name']) || taskName('', text || path.basename(folder))).slice(0, 30);
+  const name = (asText(body['name']) || taskName('', text || path.basename(folder) || 'task')).slice(0, 30);
   newJobDevice.set(requestId, device);
   newJobs.start(requestId, { name, agent }, async (signal) => {
-    const src = await RemoteNew.sourceInfo(folder, signal);
+    // a project only on the helper (router): its own checkout by remote, nothing read here
+    const src = helperRemote ? RemoteNew.helperSource(helperRemote) : await RemoteNew.remoteSource(folder, signal);
     // "Fetch result" later brings the work back to this repo (lib/fetch_result.ts)
-    Fetch.saveSource(SOURCES_FILE, requestId, src.root);
-    noSource.delete(requestId);
+    if (src && src.root !== '') {
+      Fetch.saveSource(SOURCES_FILE, requestId, src.root);
+      noSource.delete(requestId);
+    }
     const ids = Array.isArray(body['context_from']) ? body['context_from'].map(asText) : [];
     const sources = [...new Set(ids)]
       .map((x) => snapshot.sessions.find((y) => y.id === x))
@@ -4332,30 +4630,19 @@ function startRemoteNew(body: Body): { id: string; requestId: string } {
     const { message } = await withBackground(text, sources);
     signal.throwIfAborted();
     // no remote: a bundle of the folder (with its uncommitted work), the checkout unchanged
-    const bundle = src.remote
-      ? ''
-      : (
-          await RemoteNew.snapshotBundle(
-            src.root,
-            crypto.randomBytes(6).toString('hex'),
-            path.join(INST.home, 'tmp'),
-            signal,
-          )
-        ).toString('base64');
+    const bundle =
+      !src || src.remote
+        ? ''
+        : (
+            await RemoteNew.snapshotBundle(
+              src.root,
+              crypto.randomBytes(6).toString('hex'),
+              path.join(INST.home, 'tmp'),
+              signal,
+            )
+          ).toString('base64');
     signal.throwIfAborted();
-    const req = {
-      requestId,
-      name,
-      agent,
-      text: message,
-      remote: src.remote,
-      commit: src.commit,
-      branch: src.branch,
-      dirty: src.dirty,
-      sub: src.sub,
-      bundle,
-      from: COMPUTER,
-    };
+    const req = RemoteNew.peerNewBody({ requestId, name, agent, text: message, from: COMPUTER, src, bundle });
     let r: Peer.Reply;
     try {
       // the helper answers at once; it prepares the folder as its own job and shows it in its state
@@ -4369,12 +4656,16 @@ function startRemoteNew(body: Body): { id: string; requestId: string } {
     } catch {
       /* not JSON */
     }
-    if (r.status !== 200) throw new Error(`${device}: ${asText(j['error']) || `answered ${String(r.status)}`}`);
+    if (r.status !== 200)
+      throw new Error(
+        SelfUpdate.olderHelperError(device, r.status, j) ??
+          `${device}: ${asText(j['error']) || `answered ${String(r.status)}`}`,
+      );
     if (signal.aborted) void p.request('POST', '/api/peerCancel', { requestId }).catch(() => undefined);
     p.pollNow();
     return '';
   });
-  return { id, requestId };
+  return { id, requestId, name };
 }
 
 /** Main panel: closing the preparing row `id` (r:<device>:p-<request id>). Cancelled here; when the
@@ -4446,6 +4737,7 @@ async function handlePeerNew(req: http.IncomingMessage, res: http.ServerResponse
         agent: r.agent,
       });
       console.log(`remote new: ${id} in ${p.start} (${p.from}, ${p.branch})`);
+      RemoteNew.saveRequest(REQUESTS_FILE, id, r.requestId, p.start);
       const message = RemoteNew.sessionMessage(p, r, from);
       if (message)
         void poll()
@@ -4523,7 +4815,11 @@ async function fetchWork(
     } catch {
       /* not JSON */
     }
-    if (r.status !== 200) throw new Error(`${device}: ${asText(j['error']) || `answered ${String(r.status)}`}`);
+    if (r.status !== 200)
+      throw new Error(
+        SelfUpdate.olderHelperError(device, r.status, j) ??
+          `${device}: ${asText(j['error']) || `answered ${String(r.status)}`}`,
+      );
     return j;
   };
   step(`Reading the session on ${device}`);
@@ -4670,6 +4966,139 @@ async function handlePeerFetch(req: http.IncomingMessage, res: http.ServerRespon
     }
     sendJson(res, 404, { error: 'Unknown path' });
   } catch (e) {
+    sendJson(res, 400, errorReply(e));
+  }
+}
+
+// ---------- helper update (lib/self_update.ts) ----------
+/** Main panel: updateHelper {device, updateId?} sends this Mac's code to the helper, which installs
+ * it and restarts. Answers at once; the helper's row in `peers` shows updating, then the new commit
+ * (or the error). */
+function updateAction(args: Json, req: http.IncomingMessage): Json {
+  if (!fromThisMac(req) || viaRemote.has(req)) throw new Error('Only this Mac can update a helper computer');
+  const device = asText(args['device']);
+  const p = peerSet.get(device);
+  if (!p) throw new Error(`${device || 'This computer'} is not one of your helper computers`);
+  if (!OWN_BUILD.commit) throw new Error('This Mac does not know its own Thoth build, so it cannot update others');
+  if (p.view().build?.commit === OWN_BUILD.commit) throw new Error(`${device} already runs this Thoth`);
+  const given = asText(args['updateId']);
+  const updateId = SelfUpdate.UPDATE_ID.test(given) ? given : SelfUpdate.newUpdateId();
+  const job = updateJobs.start(device, updateId, OWN_BUILD.commit, () => sendUpdate(device, updateId));
+  return { updateId: job.updateId, state: job.state };
+}
+
+/** Main panel: this Mac's code as a bundle, to the helper (POST /api/peerUpdate). */
+async function sendUpdate(device: string, updateId: string): Promise<void> {
+  const p = peerSet.get(device);
+  if (!p) throw new Error(`${device} is not one of your helper computers`);
+  const dir = path.join(INST.home, 'tmp');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `update-${updateId}.tgz`);
+  try {
+    const sha256 = await SelfUpdate.makeBundle(ROOT, file, OWN_BUILD.commit);
+    const bundle = fs.readFileSync(file);
+    if (bundle.length > SelfUpdate.MAX_BUNDLE) throw new Error('The update bundle is too large');
+    const body = {
+      updateId,
+      commit: OWN_BUILD.commit,
+      time: OWN_BUILD.time,
+      sha256,
+      bundle: bundle.toString('base64'),
+    };
+    let r: Peer.Reply;
+    try {
+      r = await p.request('POST', '/api/peerUpdate', body);
+    } catch (e) {
+      throw new Error(`${device} does not answer: ${errMsg(e)}`, { cause: e });
+    }
+    let j: Json = {};
+    try {
+      j = asObj(JSON.parse(r.body.toString())) ?? {};
+    } catch {
+      /* not JSON */
+    }
+    if (r.status !== 200) {
+      if (SelfUpdate.olderHelperError(device, r.status, j) !== null)
+        throw new Error(
+          `${device} runs a Thoth from before remote updates: install the new version on it by hand once`,
+        );
+      throw new Error(`${device}: ${asText(j['error']) || `answered ${String(r.status)}`}`);
+    }
+    console.log(`update: ${device} has ${OWN_BUILD.commit.slice(0, 12)} (${String(bundle.length)} bytes), installing`);
+    p.pollNow();
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+}
+
+const helperUpdate = { running: '' };
+/** Helper: POST /api/peerUpdate from the owner's main panel (same checks as /api/peerNew). Checks the
+ * bundle (SHA-256, file list), answers at once and installs it detached (scripts/self-update.sh). */
+async function handlePeerUpdate(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!fromOwnerPanel(req)) {
+    req.resume();
+    sendJson(res, 403, { error: 'Only the owner’s main panel can update this computer' });
+    return;
+  }
+  let body: Body;
+  try {
+    body = await readBody(req, SelfUpdate.MAX_BODY);
+  } catch {
+    sendJson(res, 413, { error: 'Request too large' });
+    return;
+  }
+  let taken = '';
+  try {
+    const why = SelfUpdate.cannotUpdate(ROOT);
+    if (why) throw new Error(why);
+    const r = SelfUpdate.parseRequest(body);
+    const now = SelfUpdate.readStatus(INST.home);
+    if (now?.id === r.updateId) {
+      sendJson(res, 200, { updateId: r.updateId, state: now.state });
+      return;
+    }
+    // one update at a time: taken before the first await (a second request waits for nothing, it is
+    // refused); free again when this one's checks fail or its script reported a failure
+    const run = helperUpdate.running;
+    if (run !== '' && !(now?.id === run && now.state === 'failed'))
+      throw new Error('An update is already running on this computer');
+    helperUpdate.running = r.updateId;
+    taken = r.updateId;
+    const dir = path.join(INST.home, 'tmp');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, `update-${r.updateId}.tgz`);
+    fs.writeFileSync(file, r.bundle, { mode: 0o600 });
+    const tar = (args: string[]): Promise<string[]> =>
+      new Promise((resolve) => {
+        execFile('/usr/bin/tar', [...args, file], { maxBuffer: 16 * 1024 * 1024 }, (e, out) => {
+          resolve(e ? [] : out.split('\n').filter(Boolean));
+        });
+      });
+    const bad = SelfUpdate.checkList(await tar(['-tzf']), await tar(['-tvzf']));
+    if (bad) {
+      fs.rmSync(file, { force: true });
+      throw new Error(bad);
+    }
+    SelfUpdate.writeStatus(INST.home, { id: r.updateId, state: 'installing', error: '', commit: r.commit });
+    updateCache.reset();
+    SelfUpdate.startInstall({
+      root: ROOT,
+      bundle: file,
+      home: INST.home,
+      updateId: r.updateId,
+      commit: r.commit,
+      time: r.time,
+      label: SelfUpdate.launchdLabel(process.env),
+      node: process.execPath,
+      serverPid: process.pid,
+    });
+    taken = ''; // the script has it now: it frees the slot by writing failed (or the restart does)
+    console.log(`update ${r.updateId}: installing ${r.commit.slice(0, 12)} from the main panel`);
+    broadcast();
+    sendJson(res, 200, { updateId: r.updateId, state: 'installing' });
+  } catch (e) {
+    // a check or a step before the script failed (a bad bundle, a full disk): the slot is free again
+    if (taken !== '' && helperUpdate.running === taken) helperUpdate.running = '';
     sendJson(res, 400, errorReply(e));
   }
 }

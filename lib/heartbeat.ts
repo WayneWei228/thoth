@@ -1,6 +1,6 @@
 // Device heartbeat (multi-device plan, PR 3). Every 30 s this computer's server tells the brain how
 // it is: online, role (main/helper), on AC power, CPU load, running sessions, the projects it has
-// (git remote + path), whether claude/codex are available, and the Thoth version. Outgoing HTTPS only;
+// (git remote + path), whether claude/codex are available, and the Thoth version and commit. Outgoing HTTPS only;
 // the brain (brain/heartbeat.py) keeps the newest one and calls a device offline after 90 s.
 // This file holds the parts that need no server: what to send, where, and how to read git and pmset.
 import fs from 'node:fs';
@@ -59,6 +59,8 @@ export interface Heartbeat {
   claude: boolean;
   codex: boolean;
   thoth_version: string;
+  /** the Thoth commit (40 hex), '' when not known (lib/self_update.ts readBuild) */
+  thoth_commit: string;
   device?: string;
 }
 
@@ -72,6 +74,7 @@ export interface HeartbeatInput {
   claude: boolean;
   codex: boolean;
   version: string;
+  commit: string;
 }
 
 export function build(i: HeartbeatInput): Heartbeat {
@@ -86,6 +89,7 @@ export function build(i: HeartbeatInput): Heartbeat {
     claude: i.claude,
     codex: i.codex,
     thoth_version: i.version,
+    thoth_commit: /^[\da-f]{40}$/.test(i.commit) ? i.commit : '',
   };
 }
 

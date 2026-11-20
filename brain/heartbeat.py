@@ -24,6 +24,7 @@ _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 _USERINFO = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/]*@", re.I)   # up to the last '@' before the path
 _SCP_PASSWORD = re.compile(r"^[^/:@]*:[^/]*@")                     # user:pw@host:path
 _VERSION = re.compile(r"^[0-9A-Za-z.+-]{1,40}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
 def init(db):
@@ -81,6 +82,7 @@ def clean(body):
         "claude": _bool(b.get("claude")),
         "codex": _bool(b.get("codex")),
         "thoth_version": v if isinstance(v := b.get("thoth_version"), str) and _VERSION.match(v) else "",
+        "thoth_commit": c if isinstance(c := b.get("thoth_commit"), str) and _COMMIT.match(c) else "",
     }
 
 

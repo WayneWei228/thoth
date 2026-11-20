@@ -295,7 +295,7 @@ def join_cloud(hub, code, name, wait=True):
                 "machine": body.get("machine", "")}
         save(conf)
         print(f"Asked your cloud brain to let '{body['name']}' join.")
-        print("Waiting for approval on your Mac… Open Thoth there and choose Approve.", flush=True)
+        print("Waiting for approval. In Thoth on your main Mac: the join request at the top of the sidebar, or File > Set Up Devices… Choose Approve there.", flush=True)
         return wait_approval() if wait else 6   # 6: asked, not approved yet (join.sh installs the schedule, then runs "wait")
     if status in (401, 403) and code:
         print(f"Joining failed: {j.get('error') or 'the code is wrong, used or expired'}.")
@@ -392,7 +392,7 @@ def push():
     if cloud and not conf.get("token"):
         st = poll_once(conf) if conf.get("pending_id") else "gone"
         if st in ("pending", "error"):
-            print("Waiting for approval on your Mac… Open Thoth there and choose Approve.")
+            print("Waiting for approval. In Thoth on your main Mac: the join request at the top of the sidebar, or File > Set Up Devices… Choose Approve there.")
             return 0
         if st == "ignored":
             print("The owner chose Ignore, so this computer does not send sessions.")

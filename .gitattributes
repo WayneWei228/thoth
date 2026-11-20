@@ -1,0 +1,2 @@
+# git archive fills in BUILD (the commit and its time): a downloaded copy knows its build (lib/self_update.ts)
+BUILD export-subst

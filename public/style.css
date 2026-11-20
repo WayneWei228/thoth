@@ -85,6 +85,12 @@ html.website #sidebar .nav .ic.web { display: block; }
 #sidebar .row.tall .dot { align-self: flex-start; margin-top: 8px; }
 html.website #sidebar .row.tall .dot { margin-top: 7px; }
 #sidebar .row .tm.needs { color: var(--red); }
+#sidebar .join { display: flex; flex-direction: column; gap: 6px; margin: 0 10px 4px; padding: 6px 8px 6px 10px; border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent); }
+#sidebar .join .jt { min-width: 0; display: flex; flex-direction: column; }
+#sidebar .join .nm { font: 500 13px/16px var(--sans); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sidebar .join .sub { font: 400 11px/14px var(--sans); color: var(--soft); margin-top: 1px; }
+#sidebar .join .jb { flex: none; display: flex; gap: 4px; }
 .conn { flex: none; margin: 0 18px 6px; font-size: 11px; color: var(--red); }
 .side-settings { flex: none; display: flex; align-items: center; gap: 5px; margin: 0 0 12px 18px; padding: 0; border: 0; background: none;
   color: var(--soft); font: 400 13px/16px var(--sans); cursor: pointer; align-self: flex-start; }

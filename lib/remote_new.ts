@@ -6,6 +6,7 @@
 //   project folder ─┬─ has a git remote ─────▶ the same project here (match by remote)? → git worktree
 //                   │                           else                                   → git clone
 //                   └─ no remote ── bundle ───▶ git init + fetch the bundle
+//   no folder, or not a git repository ── scratch ▶ an empty folder (no code is sent)
 //
 // - The user's checkouts are never changed: the main Mac's snapshot uses a temporary index and a
 //   private ref that is deleted after the bundle is written (brain/collector.py snapshot); on the
@@ -154,6 +155,8 @@ export interface PeerNewRequest {
   requestId: string;
   /** the subfolder of the repository the session starts in ('' = the root) */
   sub: string;
+  /** no project: the helper makes an empty folder (no remote, no bundle) */
+  scratch: boolean;
 }
 
 /** A request id: 16 hex characters. */
@@ -168,15 +171,16 @@ export function parseRequest(j: Record<string, unknown>): PeerNewRequest {
   if (agent !== 'claude' && agent !== 'codex') throw new Error('Unknown agent');
   const text = str(j['text']);
   if (text.length > MAX_TEXT) throw new Error('The request is too long');
-  const remote = str(j['remote']);
+  const scratch = j['scratch'] === true;
+  const remote = scratch ? '' : str(j['remote']);
   if (remote !== '' && !validRemote(remote)) throw new Error('This git remote cannot be used on the helper');
   const commit = str(j['commit']);
   if (commit !== '' && !/^[\da-f]{40}$/.test(commit)) throw new Error('Bad commit');
-  const b64 = str(j['bundle']);
+  const b64 = scratch ? '' : str(j['bundle']);
   if (b64.length > MAX_BODY || (b64 !== '' && !/^[A-Za-z\d+/]+={0,2}$/.test(b64))) throw new Error('Bad bundle');
   const bundle = b64 === '' ? null : Buffer.from(b64, 'base64');
   if (bundle && bundle.length > MAX_BUNDLE) throw new Error('The project is too large to send without a git remote');
-  if (!bundle && remote === '') throw new Error('No code: neither a git remote nor a bundle');
+  if (!scratch && !bundle && remote === '') throw new Error('No code: neither a git remote nor a bundle');
   const dirty = Number(j['dirty']);
   const requestId = str(j['requestId']);
   if (!REQUEST_ID.test(requestId)) throw new Error('Bad request id');
@@ -191,14 +195,15 @@ export function parseRequest(j: Record<string, unknown>): PeerNewRequest {
     branch: str(j['branch']).slice(0, 100),
     dirty: Number.isInteger(dirty) && dirty > 0 ? dirty : 0,
     bundle,
+    scratch,
   };
 }
 
-/** A folder name from the remote or the session name: letters, digits, `.`, `_`, `-` only. */
+/** A folder name from the remote or the session name: letters (any script), digits, `.`, `_`, `-` only. */
 export function folderName(remote: string, name: string): string {
   const base = remote ? (normRemote(remote).split('/').pop() ?? '') : name;
   const safe = base
-    .replaceAll(/[^\w.-]/g, '_')
+    .replaceAll(/[^\p{L}\p{N}_.-]/gu, '_')
     .replace(/^\.+/, '')
     .slice(0, 60);
   return safe || 'project';
@@ -286,6 +291,43 @@ export async function sourceInfo(folder: string, signal?: AbortSignal): Promise<
   return { root, sub, remote, commit, branch, dirty: status ? status.split('\n').length : 0 };
 }
 
+/** The source of a project only on the helper (router): its git remote; nothing is read on this Mac
+ * (root '' = no "Fetch result" source to save), and the helper starts from its own checkout. */
+export const helperSource = (remote: string): Source => ({
+  root: '',
+  sub: '',
+  remote,
+  commit: '',
+  branch: '',
+  dirty: 0,
+});
+
+/** The body of POST /api/peerNew: the code of `src` (a bundle when it has no remote), or a scratch
+ * request (an empty folder on the helper) when there is no source. */
+export function peerNewBody(o: {
+  requestId: string;
+  name: string;
+  agent: string;
+  text: string;
+  from: string;
+  src: Source | null;
+  bundle: string;
+}): Record<string, unknown> {
+  const head = { requestId: o.requestId, name: o.name, agent: o.agent, text: o.text, from: o.from };
+  if (!o.src) return { ...head, scratch: true };
+  const { remote, commit, branch, dirty, sub } = o.src;
+  return { ...head, remote, commit, branch, dirty, sub, bundle: o.bundle };
+}
+
+/** sourceInfo for a folder that can send code; null for no folder or a folder outside a git
+ * repository (the helper then starts in an empty folder: a scratch request). */
+export async function remoteSource(folder: string, signal?: AbortSignal): Promise<Source | null> {
+  if (!folder) return null;
+  const root = await git(['rev-parse', '--show-toplevel'], { cwd: folder, signal }).catch(() => '');
+  signal?.throwIfAborted();
+  return root ? sourceInfo(folder, signal) : null;
+}
+
 /** A bundle of the work in `root` (commits + staged + unstaged + new files, as .gitignore allows)
  * WITHOUT changing the user's branch, index or working tree: a temporary index builds a commit on the
  * private ref refs/thoth/remote-new/<id>, which is deleted after the bundle is written. */
@@ -331,7 +373,7 @@ export interface Prepared {
   /** where the session starts: the subfolder the main Mac chose when it is there, else `folder` */
   start: string;
   branch: string;
-  from: 'worktree' | 'clone' | 'bundle';
+  from: 'worktree' | 'clone' | 'bundle' | 'scratch';
   commit: string;
   note: string;
 }
@@ -387,6 +429,11 @@ async function prepareCode({
   // every git call of this request stops when the row is closed
   const run = (args: readonly string[], cwd: string): Promise<string> => git(args, { cwd, signal });
   try {
+    if (req.scratch) {
+      fs.mkdirSync(folder);
+      signal?.throwIfAborted();
+      return { folder, branch: '', from: 'scratch', commit: '', note: 'an empty folder: no code was sent' };
+    }
     if (req.bundle) {
       const file = path.join(base, 'code.bundle');
       fs.writeFileSync(file, req.bundle, { mode: 0o600 });
@@ -456,9 +503,11 @@ async function prepareCode({
 /** The first lines the new session gets: where it is and how its code came, then the request. */
 export function sessionMessage(p: Prepared, req: PeerNewRequest, from: string): string {
   const lines = [
-    `[Thoth] This session was started from ${from || 'the main Mac'} on this computer, in ${p.start}, branch ${p.branch} (${p.note}). Commit your work on this branch.`,
+    p.from === 'scratch'
+      ? `[Thoth] This session was started from ${from || 'the main Mac'} on this computer, in ${p.start} (${p.note}).`
+      : `[Thoth] This session was started from ${from || 'the main Mac'} on this computer, in ${p.start}, branch ${p.branch} (${p.note}). Commit your work on this branch.`,
   ];
-  if (req.dirty > 0 && p.from !== 'bundle')
+  if (req.dirty > 0 && p.from !== 'bundle' && p.from !== 'scratch')
     lines.push(
       `The main Mac had uncommitted changes in ${String(req.dirty)} file(s) there; they are not in this folder.`,
     );
@@ -687,3 +736,122 @@ export function routeNew(o: {
   if (!o.peer.online) throw new Error(`${o.device} does not answer now (asleep, off, or no network)`);
   return 'helper';
 }
+
+// A helper keeps the request id of each session a request started in <home>/remote-requests.json
+// (window id -> request id and folder), so the id survives a server restart (an update, a crash). The
+// main Mac uses it to find the repo the session came from ("Fetch result", lib/fetch_result.ts).
+const MAX_SAVED = 200;
+export type Saved = Record<string, { request: string; folder: string }>;
+export function loadSaved(file: string): Saved {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    if (j === null || typeof j !== 'object' || Array.isArray(j)) return {};
+    const out: Saved = {};
+    for (const [k, v] of Object.entries(j as Record<string, unknown>)) {
+      const o = v as { request?: unknown; folder?: unknown } | null;
+      if (
+        /^@\d{1,6}$/.test(k) &&
+        typeof o?.request === 'string' &&
+        REQUEST_ID.test(o.request) &&
+        typeof o.folder === 'string'
+      )
+        out[k] = { request: o.request, folder: o.folder };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+export function saveRequest(file: string, windowId: string, requestId: string, folder: string): void {
+  if (!/^@\d{1,6}$/.test(windowId) || !REQUEST_ID.test(requestId) || !path.isAbsolute(folder)) return;
+  const all = loadSaved(file);
+  Reflect.deleteProperty(all, windowId);
+  all[windowId] = { request: requestId, folder };
+  const keep = Object.fromEntries(Object.entries(all).slice(-MAX_SAVED));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${String(process.pid)}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(keep) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+/** The saved request id of window `windowId`, when its folder is still the session's folder (a window
+ * id that tmux gave again to another session does not match); '' otherwise. */
+export function savedRequest(file: string | Saved, windowId: string, folder: string): string {
+  const s = (typeof file === 'string' ? loadSaved(file) : file)[windowId];
+  return s && (folder === s.folder || folder.startsWith(s.folder + path.sep)) ? s.request : '';
+}
+
+/** What a router start on a helper sends: `folder` (a folder on this Mac: its code when it is in a
+ * git repository, else an empty folder there; '' = no project), `remote` (a project only on the
+ * helper: its git remote from the helper's project list, so the helper uses its own checkout), or
+ * `fallback` (no remote to send: the session starts on this Mac and the note says why). */
+export type RoutedCode = { folder: string } | { remote: string } | { fallback: string };
+
+/** The code for the router's `project` (the folder it chose; '' = none). The default folder is not a
+ * project the router chose: an empty folder there. A folder here outside a git project cannot travel:
+ * the helper gets an empty folder only when the user named it (`named`), else the session stays here.
+ * `helperRemote`: the git remote of `project` in a helper's project list ('' = none). */
+export function routedCode(o: {
+  project: string;
+  defaultFolder: string;
+  isDir: (folder: string) => boolean;
+  isGit: (folder: string) => boolean;
+  named: boolean;
+  helperRemote: string;
+  device: string;
+}): RoutedCode {
+  if (!o.project || o.project === o.defaultFolder) return { folder: '' };
+  const name = path.basename(o.project);
+  if (o.isDir(o.project)) {
+    if (o.isGit(o.project) || o.named) return { folder: o.project };
+    return { fallback: `${name} is not a git project, so its files stay on this Mac and the session starts here.` };
+  }
+  const remote = sendableRemote(o.helperRemote);
+  if (remote) return { remote };
+  return { fallback: `${name} on ${o.device} has no git remote this panel can send, so it starts on this Mac.` };
+}
+
+/** Where the router's "new" decision starts: on the helper the device rules chose (`device`) when
+ * this panel has it online (`remote`: startRemoteNew, a preparing row at once), else on this Mac
+ * (`local`) with a note that says why. `ownApp`: the request came from this Mac's own app or page
+ * (the same rule as POST /api/new with a device: routeNew), never a remote client or a page through the relay. */
+export async function startRouted(o: {
+  device: string;
+  peer: { online: boolean } | undefined;
+  ownApp: boolean;
+  code: RoutedCode;
+  remote: (code: { folder: string } | { remote: string }) => { id: string; requestId: string };
+  /** this Mac; `note` says why a chosen helper did not get it ('' = no helper was chosen) */
+  local: (note: string) => Promise<void>;
+}): Promise<{ where: 'helper' | 'local'; id: string; note: string }> {
+  const { device, peer, code } = o;
+  let note = '';
+  if (!device) {
+    /* no helper chosen: this Mac, no note */
+  } else if (!o.ownApp)
+    note = `A session on ${device} can be started only from this Mac’s own Thoth, so it starts on this Mac.`;
+  else if (!peer) note = `${device} is not connected to this panel, so it starts on this Mac.`;
+  else if (!peer.online) note = `${device} does not answer now, so it starts on this Mac.`;
+  else if ('fallback' in code) note = code.fallback;
+  else return { where: 'helper', id: o.remote(code).id, note: '' };
+  await o.local(note);
+  return { where: 'local', id: '', note };
+}
+
+/** The route record of a router start on a helper: the preparing row is the target; no folder here. */
+export const sentPatch = (
+  id: string,
+  name: string,
+): { status: 'sent'; folder: ''; target: string; targetName: string } => ({
+  status: 'sent',
+  folder: '',
+  target: id,
+  targetName: name,
+});
+
+/** The request for a session the router started on a helper. The request often names the computer
+ * and asks for a session ("open a session on X to …"); without this line, Claude on X tried to start
+ * yet another session instead of doing the task (staged test, 2026-11-19). */
+export const routedText = (device: string, text: string): string =>
+  text
+    ? `[Thoth] The request below asked for a session on ${device}. This session is that session: do the task here. Do not start another session.\n\n${text}`
+    : '';

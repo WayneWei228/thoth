@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { hostName, readJson } from './devices.ts';
+import { WHERE as APPROVE_WHERE } from './join_requests.ts';
 import * as Setup from './setup.ts';
 
 export type Role = 'main' | 'helper';
@@ -308,10 +309,7 @@ async function joinCloud(o: SetupOptions, d: Deps): Promise<Step> {
     return step('done', `Joined the cloud brain at ${hub} as '${after.device}'.`);
   }
   if (after.state === 'pending')
-    return step(
-      'pending',
-      `Asked the cloud brain at ${hub} to let '${after.device}' join. On the main computer, open Thoth and choose Approve, then run this same command again.`,
-    );
+    return step('pending', `Asked the cloud brain at ${hub} to let '${after.device}' join.`);
   return step('failed', `Joining failed: ${lastLines(run.out) || `device agent exit ${String(run.code)}`}`);
 }
 
@@ -407,7 +405,8 @@ export function formatSetup(r: SetupResult): string {
   const mark = { done: 'done     ', unchanged: 'unchanged', pending: 'waiting  ', failed: 'FAILED   ' };
   const lines = r.steps.map((s) => `  ${mark[s.status]}  ${s.step}: ${printable(s.message)}`);
   let tail = 'Setup is complete.';
-  if (r.code === 6) tail = 'Waiting for Approve. Run the same command again after the owner approves.';
+  if (r.code === 6)
+    tail = `Waiting for Approve.\n${APPROVE_WHERE}\nAfter the owner chooses Approve there, run the same command again.`;
   else if (r.code !== 0) tail = 'Setup is not complete. Fix the step above and run the same command again.';
   return ['Thoth setup', ...lines, tail].join('\n');
 }

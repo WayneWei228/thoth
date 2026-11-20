@@ -246,6 +246,7 @@ export interface CloudDeviceRow {
   status?: unknown;
   last_error?: unknown;
   error?: unknown;
+  created?: unknown;
   online?: unknown;
   last_heartbeat?: unknown;
 }
@@ -261,6 +262,8 @@ export interface CloudItem {
   error: string;
   self: boolean;
   joined: boolean;
+  /** when the device asked (ms), 0 when the brain does not say */
+  asked: number;
   /** from the brain's heartbeat: true/false, null = no heartbeat data (an old agent) */
   online: boolean | null;
   /** ms; 0 = no heartbeat */
@@ -310,6 +313,7 @@ export function cloudView(
       error: textOr(d.last_error, d.error),
       self: Boolean(selfName) && d.name === selfName,
       joined,
+      asked: Number(d.created) > 0 ? Number(d.created) * (Number(d.created) < 1e12 ? 1000 : 1) : 0,
       online: typeof d.online === 'boolean' ? d.online : null,
       lastHeartbeat: Number(d.last_heartbeat ?? 0) * 1000 || 0,
     };

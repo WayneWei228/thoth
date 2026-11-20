@@ -35,6 +35,7 @@ interface Session {
   activity?: number;
   offline?: boolean;
   fetch?: FetchInfo; // the newest "Fetch result" of a helper session (lib/fetch_result.ts)
+  waits?: { kind: string; text: string }; // an idle session that waits for the owner (server.ts)
 }
 interface Route {
   id: string;
@@ -58,6 +59,18 @@ interface StateMessage {
   routes?: Route[];
   defaultFolder?: string;
   platform?: string;
+  joins?: JoinRequest[];
+  join?: JoinRequest;
+}
+/** A computer waiting for the owner's Approve on the cloud brain (lib/join_requests.ts). */
+interface JoinRequest {
+  id: string;
+  name: string;
+  os: string;
+  host?: string;
+  title: string;
+  system: string;
+  notice?: string;
 }
 interface ApiAnswer {
   error?: string;
@@ -249,9 +262,10 @@ function setLook(l: string): void {
 // ---------- state socket ----------
 let stateKey: string | null = null;
 function onMessage(m: StateMessage, snapshot = false): void {
+  onJoins(m.joins ?? []);
   onMeta(m);
   onRoutes(m.routes ?? []);
-  onState(m.sessions ?? [], snapshot);
+  onState((m.sessions ?? []).map(shown), snapshot);
 }
 function connectState(): void {
   const ws = new WebSocket(`${wsBase()}/ws/state`);
@@ -267,6 +281,8 @@ function connectState(): void {
   ws.addEventListener('message', (e: MessageEvent<string>) => {
     const m = JSON.parse(e.data) as StateMessage;
     if (m.type === 'state') onMessage(m);
+    // a computer asks to join: once per request id (server.ts announceJoins)
+    else if (m.type === 'joinNotice' && m.join) notify(m.join.title, m.join.notice ?? m.join.system, '');
   });
 }
 // first paint before the socket opens
@@ -557,7 +573,7 @@ async function routeTo(r: Route, body: Record<string, unknown>): Promise<void> {
   const { id } = await api('routeTo', { routeId: r.id, ...body });
   if (has(id))
     setTimeout(() => {
-      go('session', id);
+      if (id) go('session', id);
     }, 400);
 }
 
@@ -797,6 +813,14 @@ const ask = makeComposer({
   },
 });
 
+/** An idle session that waits for the owner (server.ts Session.waits: its last reply asks a question, or
+ * its input box holds text that was never sent) is shown like 'needs': first, notified, with the text and
+ * no option buttons. Only the panel shows it so: the server keeps it 'idle' (it may receive messages). */
+function shown(s: Session): Session {
+  if (s.state !== 'idle' || !s.waits) return s;
+  const question = s.waits.kind === 'draft' ? `Not sent: ${s.waits.text}` : s.waits.text;
+  return { ...s, state: 'needs', question, options: [] };
+}
 function onState(list: Session[], snapshot = false): void {
   for (const s of list) {
     const p = prev.get(s.id);
@@ -966,6 +990,50 @@ for (const n of document.querySelectorAll<HTMLElement>('#sidebar .nav'))
     const p = n.dataset['page'];
     if (isPage(p)) go(p);
   });
+
+// ---------- join requests at the top of the sidebar (MainWindow.swift .join rows) ----------
+let joinsKey: string | null = null;
+const deciding = new Set<string>(); // ids with an Approve / Ignore on the way
+function onJoins(list: JoinRequest[]): void {
+  const k = JSON.stringify(list.map((r) => [r.id, r.name, r.os]));
+  if (k === joinsKey) return;
+  joinsKey = k;
+  for (const id of deciding) if (!list.some((r) => r.id === id)) deciding.delete(id);
+  const box = $('#joins');
+  box.innerHTML = '';
+  if (list.length === 0) return;
+  box.append(header('Wants to Join'));
+  for (const r of list) box.append(joinRow(r));
+}
+function joinRow(r: JoinRequest): HTMLDivElement {
+  const d = document.createElement('div');
+  d.className = 'join';
+  d.dataset['testid'] = `join.${r.name}`;
+  d.setAttribute('role', 'group');
+  d.setAttribute('aria-label', r.title);
+  const os = r.notice ?? r.system;
+  d.innerHTML =
+    `<span class="jt"><span class="nm">${esc(r.name)}</span><span class="sub">${esc(os)}</span></span>` +
+    `<span class="jb"><button class="btn small primary" data-testid="join.approve.${esc(r.name)}">Approve</button>` +
+    `<button class="btn small" data-testid="join.ignore.${esc(r.name)}">Ignore</button></span>`;
+  const [ok, no] = d.querySelectorAll('button');
+  const decide = (decision: 'approve' | 'ignore') => async (): Promise<void> => {
+    if (ok === undefined || no === undefined) return;
+    ok.disabled = no.disabled = true;
+    deciding.add(r.id);
+    try {
+      await api('setupCloudDevice', { id: r.id, decision });
+      toast(decision === 'approve' ? `${r.name} can join now` : `${r.name} is ignored`);
+    } catch {
+      deciding.delete(r.id);
+      ok.disabled = no.disabled = false;
+    }
+  };
+  ok?.addEventListener('click', run(decide('approve')));
+  no?.addEventListener('click', run(decide('ignore')));
+  if (deciding.has(r.id) && ok !== undefined && no !== undefined) ok.disabled = no.disabled = true;
+  return d;
+}
 
 // ---------- All Sessions (SessionsViewController.swift): one section per project folder ----------
 const RANK: Record<string, number> = {

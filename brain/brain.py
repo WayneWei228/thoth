@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python3 -I leaves the script folder out of sys.path
 import cloud_auth  # noqa: E402
+import events  # noqa: E402
 import peers  # noqa: E402
 import heartbeat  # noqa: E402
 COLLECTOR = os.path.join(HERE, "collector.py")
@@ -994,6 +995,9 @@ class HttpError(Exception):
         self.code, self.msg = code, msg
 
 
+EVENTS = events.Hub()   # the owner panels' event connections (GET /api/events)
+
+
 class Handler(BaseHTTPRequestHandler):
     db = None
     lock = threading.Lock()
@@ -1172,6 +1176,8 @@ class Handler(BaseHTTPRequestHandler):
         m = JOIN_ROUTE.match(u.path)
         if m:
             return self.poll_join(m.group(1))
+        if u.path == "/api/events":
+            return self.events()
         if u.path in ("/api/peer/keys", "/api/peer/links"):
             return self.peer_get(u.path, q)
         read = {"/api/sessions", "/api/memories", "/api/context", "/api/search", "/api/projects", "/api/grep",
@@ -1249,6 +1255,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     raise HttpError(409, str(e))
             log_event("owner: %s device %s (%s)" % (m.group(2), d["name"], d["id"]))
+            self.push_devices()
             return self.send(200, d)
         if path == "/api/devices/remove":
             self.auth("write")
@@ -1261,6 +1268,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     raise HttpError(409, str(e))
             log_event("owner: removed device %s (%d sessions)" % (r["device"], r["sessions"]))
+            self.push_devices()
             return self.send(200, r)
         if path == "/api/codes":
             self.auth("owner")
@@ -1320,6 +1328,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"id": rid})
         raise HttpError(404, "not found")
 
+    def events(self):
+        """GET /api/events (WebSocket, owner token): the device list now and after every change that the
+        owner decides on (brain/events.py). The main panel shows join requests from it at once."""
+        if (self.headers.get("Upgrade") or "").lower() != "websocket" or not self.headers.get("Sec-WebSocket-Key"):
+            raise HttpError(400, "this is a WebSocket endpoint")
+        # a browser always sends Origin and WebSockets have no CORS: a web page must not read the list
+        # live (the panel's client sends no Origin)
+        if self.headers.get("Origin"):
+            raise HttpError(403, "not for web pages")
+        self.auth("write")   # the owner token, also on a local-trust brain (no 'local' role)
+        tok = self.bearer()
+        with self.lock:
+            first = {"type": "devices", "devices": all_devices(self.db)}
+        # checked again every 25 s: after `owner-token --rotate` the old token loses the stream
+        events.serve(self, EVENTS, first, still_ok=lambda: self.is_owner_token(tok))
+
+    def push_devices(self):
+        """Send the device list to the owner panels' event connections (a join request or a decision)."""
+        with self.lock:
+            msg = {"type": "devices", "devices": all_devices(self.db)}
+        EVENTS.publish(msg)
+
     def join(self):
         """POST /api/join {name, os, host, code?}: a new device asks to join (public, rate-limited)."""
         ip = self.client_ip()
@@ -1341,6 +1371,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.limiter.hit(("badcode", ip), *BAD_CODE_LIMIT)
                 raise HttpError(403, "the code is wrong, used or expired; ask the owner for a new one")
             log_event("device %s joined with a one-time code from %s" % (r["device"], ip))
+            self.push_devices()
             return self.send(200, r)
         name = b.get("name")
         name = name.strip().lower() if isinstance(name, str) else ""
@@ -1352,6 +1383,7 @@ class Handler(BaseHTTPRequestHandler):
             except OverflowError as e:
                 raise HttpError(429, str(e))
         log_event("device %s (%s) asks to join from %s" % (r["device"], r["pending_id"], ip))
+        self.push_devices()
         return self.send(200, r)
 
     def peer_get(self, path, q):

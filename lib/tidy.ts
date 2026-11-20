@@ -38,6 +38,8 @@ export interface TidySession {
   activity?: number | null;
   prompt?: string | null;
   last?: string | null;
+  /** an idle session that waits for the owner (server.ts Session.waits): never suggested for closing */
+  waits?: unknown;
 }
 
 function hoursAgo(ms: number | null | undefined, now: number): number | null {
@@ -83,7 +85,9 @@ ${JSON.stringify(list, null, 1)}`;
 export function protectedIds(sessions: TidySession[], keepIds: string[] = []): Set<string> {
   return new Set([
     ...keepIds,
-    ...sessions.filter((s) => s.state === 'working' || s.state === 'needs').map((s) => s.id),
+    ...sessions
+      .filter((s) => s.state === 'working' || s.state === 'needs' || (s.waits !== undefined && s.waits !== null))
+      .map((s) => s.id),
   ]);
 }
 

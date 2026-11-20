@@ -22,6 +22,7 @@ import tls from 'node:tls';
 import WebSocket from 'ws';
 
 import * as Relay from './relay_client.ts';
+import { type Build, cleanBuild } from './self_update.ts';
 
 // ---------------------------------------------------------------- sealing ----
 // seal: an ephemeral X25519 key, ECDH with the recipient's key, HKDF-SHA256, AES-256-GCM.
@@ -259,6 +260,10 @@ export function cleanSession(s: Record<string, unknown>): StateSession | null {
   });
   const ask = s['ask'] as { tool?: unknown; detail?: unknown } | undefined;
   if (ask && typeof ask === 'object') out['ask'] = { tool: cut(ask.tool, 100), detail: cut(ask.detail, 1000) };
+  // an idle session that waits for the owner (server.ts Session.waits)
+  const waits = s['waits'] as { kind?: unknown; text?: unknown } | undefined;
+  if (waits && typeof waits === 'object' && (waits.kind === 'question' || waits.kind === 'draft'))
+    out['waits'] = { kind: waits.kind, text: cut(waits.text, 300) };
   return out;
 }
 
@@ -274,6 +279,19 @@ export interface PeerView {
   device: string;
   online: boolean;
   sessions: StateSession[];
+  /** the Thoth build the helper runs (lib/self_update.ts); null: it does not say (an older helper) */
+  build?: Build | null;
+  /** the helper's last update (lib/self_update.ts Status) */
+  update?: { id: string; state: string; error: string } | null;
+}
+
+/** The `update` field of a helper's state, with only known fields of a bounded size. */
+export function cleanUpdate(v: unknown): { id: string; state: string; error: string } | null {
+  const o = typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null;
+  if (!o || typeof o['id'] !== 'string' || !/^[\da-f]{16}$/.test(o['id'])) return null;
+  const state = typeof o['state'] === 'string' ? o['state'] : '';
+  if (!['installing', 'restarting', 'done', 'failed'].includes(state)) return null;
+  return { id: o['id'], state, error: cut(o['error'], 300) };
 }
 
 /** The state message's sessions: this Mac's, then each helper's (by device name) with
@@ -393,6 +411,8 @@ export function createPeer({ device, link, everyMs = 1500, timeoutMs = 15_000, o
   const isStopped = (): boolean => life.stopped;
   let online = false,
     sessions: StateSession[] = [],
+    build: Build | null = null,
+    update: { id: string; state: string; error: string } | null = null,
     timer: NodeJS.Timeout | undefined,
     lastKey = '',
     lastError = parsed ? '' : 'the link has no relay',
@@ -440,7 +460,7 @@ export function createPeer({ device, link, everyMs = 1500, timeoutMs = 15_000, o
   }
 
   function changed(): void {
-    const key = JSON.stringify([online, sessions]);
+    const key = JSON.stringify([online, sessions, build, update]);
     if (key === lastKey) return;
     lastKey = key;
     onChange?.();
@@ -453,8 +473,10 @@ export function createPeer({ device, link, everyMs = 1500, timeoutMs = 15_000, o
     try {
       const r = await request('GET', '/api/state');
       if (r.status !== 200) throw new Error(`the helper answered ${String(r.status)}`);
-      const j = JSON.parse(r.body.toString()) as { sessions?: unknown };
+      const j = JSON.parse(r.body.toString()) as { sessions?: unknown; build?: unknown; update?: unknown };
       sessions = Array.isArray(j.sessions) ? (j.sessions as StateSession[]) : [];
+      build = cleanBuild(j.build);
+      update = cleanUpdate(j.update);
       online = true;
       lastError = '';
     } catch (e) {
@@ -474,7 +496,7 @@ export function createPeer({ device, link, everyMs = 1500, timeoutMs = 15_000, o
   return {
     device,
     link,
-    view: () => ({ device, online, sessions }),
+    view: () => ({ device, online, sessions, build, update }),
     request,
     pollNow: () => {
       setTimeout(() => void poll(), 150).unref();

@@ -1,7 +1,7 @@
 // Device choice for a NEW session (multi-device plan, PR 6). The router (lib/router.ts) only extracts
 // a device the user named ("用家里的电脑", "on the mini") into the decision's "device"; the rules
 // here pick the computer, so the choice is testable and predictable:
-//   1. the user named a device -> that one;
+//   1. the user named a device -> that one ("this mac" also for a request about this computer itself);
 //   2. the project is on only one device (heartbeat projects, matched by git remote) -> that one;
 //   3. this Mac, unless it is busy; then the helper that is online, on AC power, has the agent,
 //      and runs the fewest sessions.
@@ -175,7 +175,11 @@ export function pickDevice(i: PickInput): Pick {
   if (i.named.trim()) {
     const thisMac = ['this mac', 'here', 'local', '本机', '这台', '这台电脑', '这台mac'];
     const name = findNamed(i.named, [...(i.local ? [i.local] : []), ...remotes.map((d) => d.name)]);
-    if ((name !== null && name.toLowerCase() === here) || thisMac.includes(i.named.trim().toLowerCase()))
+    // a word for "here": the user said it, or the router's "this mac" for a request about this computer
+    // itself (its CPU, disk, apps, local files), which the user did not name: say neither "asked" nor "busy"
+    if (thisMac.includes(i.named.trim().toLowerCase()))
+      return { device: '', rule: 'named', note: 'This request is for this Mac.' };
+    if (name !== null && name.toLowerCase() === here)
       return { device: '', rule: 'named', note: 'You asked for this Mac.' };
     const d = name === null ? undefined : remotes.find((x) => x.name === name);
     if (d) {
@@ -259,13 +263,10 @@ export function helperProject(name: string, devices: readonly Device[], local: s
   return found.every((p) => p.path === first.path || (key !== '' && remoteKey(p.remote) === key)) ? first.path : '';
 }
 
-/** The route's reason with the device choice: the router's reason, the rules' note, and, for a
- * helper, that the session starts on this Mac for now (a helper is started only once the panel's
- * POST /api/new takes a device: multi-device PR 5). */
-export function routeNote(p: Pick, reason: string): { device: string; rule: Rule; reason: string } {
-  const why = [reason, p.note];
-  if (p.device) why.push(`Starting on this Mac for now: this panel cannot start a session on ${p.device} yet.`);
-  return { device: p.device, rule: p.rule, reason: why.filter(Boolean).join(' ') };
+/** The route's reason with the device choice: the router's reason, the rules' note, and `fallback`
+ * (why a chosen helper did not get the session: lib/remote_new.ts startRouted). */
+export function routeNote(p: Pick, reason: string, fallback = ''): { device: string; rule: Rule; reason: string } {
+  return { device: p.device, rule: p.rule, reason: [reason, p.note, fallback].filter(Boolean).join(' ') };
 }
 
 /** This Mac's project folders for localCopy, most likely first: the open sessions' folders, then

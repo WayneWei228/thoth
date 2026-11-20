@@ -164,3 +164,72 @@ export function combine({ running, screen, rec, idleSince = 0, now = Date.now() 
   if (idleSince && now - Math.max(idleSince, rec.at) >= SETTLE_MS) return 'idle';
   return rec.state;
 }
+
+/**
+ * Windows whose Claude the panel just started and that have not sent SessionStart yet. Keys typed
+ * into such a Claude can be lost, and right after the folder-trust prompt they can stop the window
+ * from reading keys at all (staged A->B test, 2026-11-19: the first message of a new remote session
+ * was typed 0.2 s after the trust answer, SessionStart came 0.25 s later, and that Claude then ignored
+ * every key, also Ctrl-C). Claude runs no hooks before the trust answer, and SessionStart comes when
+ * it is ready, so the delivery queue holds messages for these windows until then.
+ */
+export interface StartGate {
+  /** The panel typed `claude` (with the state hooks) into window `id` (at `now`, ms). */
+  starting: (id: string, now?: number) => void;
+  /** A hook event from window `id`: SessionStart (ready) and SessionEnd (gone) end the hold. */
+  hook: (id: string, event: string) => void;
+  /**
+   * One poll of window `id`. Ends the hold, and returns why, when
+   *   - the agent process ended after it ran (the user chose "No, exit" at the trust prompt), or
+   *   - the screen has shown the idle input box for `settleMs` (a SessionStart hook that was lost:
+   *     the hooks post with a 1 s limit). Returns '' otherwise.
+   * A pane that has not run the agent yet is still the shell that `claude` was typed into.
+   */
+  poll: (id: string, o: { running: boolean; idleSince: number; now?: number }) => string;
+  /** Forget the windows that are gone (tmux reuses window ids after its server restarts). `ids` is
+   * the window list a poll read at `listedAt`: a window held after that may simply not be in it yet. */
+  keep: (ids: ReadonlySet<string>, listedAt: number) => void;
+  /** True while nothing may be typed into window `id` yet. */
+  waiting: (id: string) => boolean;
+}
+
+export function createStartGate(settleMs: number = SETTLE_MS): StartGate {
+  const held = new Map<string, { ran: boolean; at: number }>();
+  return {
+    starting: (id, now = Date.now()) => {
+      held.set(id, { ran: false, at: now });
+    },
+    hook: (id, event) => {
+      if (event === 'SessionStart' || event === 'SessionEnd') held.delete(id);
+    },
+    poll: (id, { running, idleSince, now = Date.now() }) => {
+      const h = held.get(id);
+      if (!h) return '';
+      if (!running) {
+        if (!h.ran) return '';
+        held.delete(id);
+        return 'the agent process ended';
+      }
+      h.ran = true;
+      if (idleSince > 0 && now - idleSince >= settleMs) {
+        held.delete(id);
+        return `idle for ${String(Math.round((now - idleSince) / 1000))} s without a SessionStart hook`;
+      }
+      return '';
+    },
+    keep: (ids, listedAt) => {
+      for (const [id, h] of held) if (!ids.has(id) && h.at < listedAt) held.delete(id);
+    },
+    waiting: (id) => held.has(id),
+  };
+}
+
+/** What the send action does with a message: a window held for its SessionStart gets it through the
+ * delivery queue (typed once Claude is ready); any other window gets it typed now. */
+export const sendMode = (gate: StartGate, id: string): 'queue' | 'type' => (gate.waiting(id) ? 'queue' : 'type');
+
+/** The send action's check of `tmux send-keys` (null = tmux failed): an error, never an answer that
+ * says nothing about a message that was not typed. */
+export function checkTyped(out: string | null): void {
+  if (out === null) throw new Error('The message could not be typed into this session');
+}

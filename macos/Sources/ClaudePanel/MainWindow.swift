@@ -77,6 +77,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func refresh() {
+        // no server and the app does not start one (Backend.serverNote): say why above the page
+        let note = Backend.shared.connected ? nil : Backend.shared.serverNote
+        window?.subtitle = note ?? ""
+        content.setBanner(note)
         sidebar.reload()
         switch page {
         case .home: home.reload()
@@ -130,9 +134,34 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 /// Holds one child view controller at a time.
 final class ContentContainer: NSViewController {
     private var currentVC: NSViewController?
+    /// Why there is no server and the app does not start one (Backend.serverNote), above every page.
+    private let banner = NSTextField(wrappingLabelWithString: "")
     override func loadView() {
         view = NSView()
         if Theme.web { view.wantsLayer = true; view.layer?.backgroundColor = Theme.paper.cgColor }
+        banner.isHidden = true
+        banner.wantsLayer = true
+        banner.drawsBackground = true
+        banner.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.18)
+        banner.textColor = .labelColor
+        banner.font = .systemFont(ofSize: 13, weight: .medium)
+        banner.alignment = .center
+        banner.layer?.cornerRadius = 8
+        banner.setAccessibilityIdentifier("main.serverNote")
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(banner)
+        NSLayoutConstraint.activate([
+            banner.topAnchor.constraint(equalTo: view.topAnchor, constant: 40),
+            banner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            banner.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -48),
+            banner.widthAnchor.constraint(lessThanOrEqualToConstant: 720),
+        ])
+    }
+
+    func setBanner(_ text: String?) {
+        _ = view
+        banner.stringValue = text.map { "  \($0)  " } ?? ""
+        banner.isHidden = text == nil
     }
 
     func set(_ vc: NSViewController) {
@@ -148,6 +177,7 @@ final class ContentContainer: NSViewController {
             vc.view.topAnchor.constraint(equalTo: view.topAnchor),
             vc.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+        view.addSubview(banner, positioned: .above, relativeTo: vc.view)
         currentVC = vc
     }
 }
@@ -158,7 +188,8 @@ private enum SideRow {
     case nav(Page, String, String)        // page, title, SF Symbol
     case header(String)
     case session(Session)
-    case device(String, Bool)             // a helper computer's name, offline (lib/peer.ts)
+    case device(String, Bool, PeerInfo?)  // a helper computer's name, offline (lib/peer.ts), its update state (lib/self_update.ts)
+    case join(JoinRequest)                // a computer waiting for Approve (lib/join_requests.ts)
 }
 
 final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
@@ -179,6 +210,9 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     // the sessions the AI ticked (not the user): only these are unticked when they start working
     private var aiTicked: Set<String> = []
     private var tidying = false
+    // join requests with an Approve / Ignore on the way (their buttons stay off until the state drops them)
+    private var deciding: Set<String> = []
+    private static let joinHeader = "Wants to Join"
     private let bar = NSView()
     private var barHeight: NSLayoutConstraint!
     private let barLabel = label("", size: 11, color: .secondaryLabelColor)
@@ -378,6 +412,13 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             .nav(.sessions, "All Sessions", "square.grid.2x2"),
             .nav(.everywhere, "All Devices", "desktopcomputer"),
         ]
+        // a computer asked to join the cloud brain: right under the pages, before any session
+        let joins = Backend.shared.joins
+        deciding.formIntersection(joins.map(\.id))
+        if !joins.isEmpty {
+            r.append(.header(Self.joinHeader))
+            r += joins.map { .join($0) }
+        }
         if !needs.isEmpty {
             r.append(.header("Needs You"))
             r += needs.map { .session($0) }
@@ -394,11 +435,14 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             r.append(.header("Recent"))
             r += rest.map { .session($0) }
         }
-        var devices: [String] = []
+        // every helper computer has a header (also one without sessions: it may need an update)
+        let peers = Backend.shared.peers
+        var devices: [String] = peers.map(\.device)
         for s in sessions { if let d = s.device, !devices.contains(d) { devices.append(d) } }
         for d in devices.sorted() {
             let items = sessions.filter { $0.device == d }
-            r.append(.device(d, items.allSatisfy(\.isOffline)))
+            let peer = peers.first { $0.device == d }
+            r.append(.device(d, peer.map { !$0.online } ?? items.allSatisfy(\.isOffline), peer))
             r += items.sorted { ($0.sessionState.rank, -(orderKey[$0.id] ?? 0), $0.id) < ($1.sessionState.rank, -(orderKey[$1.id] ?? 0), $1.id) }.map { .session($0) }
         }
         rows = r
@@ -438,6 +482,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         switch rows[row] {
         case .header, .device: return 26
         case .nav: return 30
+        case .join: return 84
         case .session(let s): return (s.title?.isEmpty == false || (selecting && hints[s.id] != nil)) ? 44 : 30
         }
     }
@@ -445,6 +490,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         if case .header = rows[row] { return false }
         if case .device = rows[row] { return false }
+        if case .join = rows[row] { return false }
         // select mode: no row can be selected. A mouse click ticks through rowClicked; with VoiceOver the
         // row's check box (a button) ticks; arrow keys do nothing, drags tick nothing.
         if selecting { return false }
@@ -460,15 +506,19 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             // Table rows do not expose identifiers; a fixed label lets agents find them.
             v?.setAccessibilityLabel("\(s.name), \(s.sessionState.label)")
         case .header(let t): v?.setAccessibilityIdentifier("header.\(t)")
-        case .device(let device, let off):
+        case .device(let device, let off, let peer):
             v?.setAccessibilityIdentifier("sidebar.device.\(device)")
-            v?.setAccessibilityLabel(off ? "\(device), offline" : device)
+            let note = peer?.note ?? (off ? "offline" : nil)
+            v?.setAccessibilityLabel(note.map { "\(device), \($0)" } ?? device)
+        case .join(let j):
+            v?.setAccessibilityIdentifier("join.\(j.name)")
         }
         return v
     }
 
     private var firstSessionHeader: String? {
-        for r in rows { if case .header(let t) = r { return t } }
+        // not "Wants to Join": Select / Tidy belong to the sessions
+        for r in rows { if case .header(let t) = r, t != Self.joinHeader { return t } }
         return nil
     }
 
@@ -500,12 +550,16 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
                                              tb.trailingAnchor.constraint(equalTo: b.leadingAnchor, constant: -10), tb.firstBaselineAnchor.constraint(equalTo: l.firstBaselineAnchor)])
             }
             return v
-        case .device(let d, let off):
-            // a helper computer: its name; grey with "offline" when it does not answer
+        case .device(let d, let off, let peer):
+            // a helper computer: its name; grey with "offline" when it does not answer; "update needed"
+            // (orange) when it runs an older Thoth, "updating…", or "update failed" (red, the error as tooltip)
             let img = NSImageView(image: Theme.icon("desktopcomputer", d)!)
             img.contentTintColor = off ? .tertiaryLabelColor : .secondaryLabelColor
             img.translatesAutoresizingMaskIntoConstraints = false
-            let l = label(off ? "\(d) · offline" : d, size: 11, weight: .semibold, color: .tertiaryLabelColor)
+            let note = peer?.note ?? (off ? "offline" : nil)
+            let color: NSColor = peer?.update == "failed" ? Theme.red : peer?.update == "needed" ? .systemOrange : .tertiaryLabelColor
+            let l = label(note.map { "\(d) · \($0)" } ?? d, size: 11, weight: .semibold, color: color)
+            if let peer, peer.canUpdate { l.toolTip = (peer.error.flatMap { $0.isEmpty ? nil : $0 + "\n" } ?? "") + "Right-click: Update \(d)" }
             let v = NSView(); v.addSubview(img); v.addSubview(l)
             NSLayoutConstraint.activate([
                 img.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8), img.centerYAnchor.constraint(equalTo: l.centerYAnchor),
@@ -513,6 +567,8 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
                 l.leadingAnchor.constraint(equalTo: img.trailingAnchor, constant: 5), l.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -4),
             ])
             return v
+        case .join(let j):
+            return joinCell(j)
         case .nav(_, let title, let symbol):
             let v = NSTableCellView()
             let img = NSImageView(image: Theme.icon(symbol, title)!)
@@ -582,13 +638,73 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
+    /// "<name> wants to join": the name, the system, Approve and Ignore (the setup page's decide path,
+    /// POST /api/setupCloudDevice). The row goes when the next state message no longer has it.
+    private func joinCell(_ j: JoinRequest) -> NSView {
+        let v = NSView()
+        v.wantsLayer = true
+        v.layer?.cornerRadius = 6
+        v.layer?.backgroundColor = Theme.accent.withAlphaComponent(0.10).cgColor
+        let icon = NSImageView(image: Theme.icon("desktopcomputer", j.system)!)
+        icon.contentTintColor = Theme.accent
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        let name = label(j.name, size: 13, weight: .medium)
+        name.lineBreakMode = .byTruncatingTail
+        // the system, host, time asked and "Approve only a computer you set up yourself." (server text)
+        let sub = label(j.notice ?? j.system, size: 11, color: .secondaryLabelColor, lines: 2)
+        let busy = deciding.contains(j.id)
+        let approve = ActionButton("Approve", prominent: true) { [weak self] in self?.decide(j, "approve") }
+        let ignore = ActionButton("Ignore") { [weak self] in self?.decide(j, "ignore") }
+        for b in [approve, ignore] { b.controlSize = .small; b.font = .systemFont(ofSize: 11); b.isEnabled = !busy }
+        approve.setAccessibilityIdentifier("join.approve.\(j.name)")
+        ignore.setAccessibilityIdentifier("join.ignore.\(j.name)")
+        approve.toolTip = "Let \(j.name) send its sessions to your brain"
+        ignore.toolTip = "Do not let \(j.name) join (you can Unignore it in File > Set Up Devices…)"
+        for x in [icon, name, sub] as [NSView] { x.translatesAutoresizingMaskIntoConstraints = false }
+        [icon, name, sub, approve, ignore].forEach { v.addSubview($0) }
+        v.setAccessibilityElement(true)
+        v.setAccessibilityRole(.group)
+        v.setAccessibilityLabel(j.title)
+        v.toolTip = j.title
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8),
+            icon.centerYAnchor.constraint(equalTo: name.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 15), icon.heightAnchor.constraint(equalToConstant: 15),
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            name.topAnchor.constraint(equalTo: v.topAnchor, constant: 6),
+            name.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -8),
+            sub.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+            sub.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1),
+            sub.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -8),
+            approve.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+            approve.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -6),
+            ignore.leadingAnchor.constraint(equalTo: approve.trailingAnchor, constant: 6),
+            ignore.centerYAnchor.constraint(equalTo: approve.centerYAnchor),
+        ])
+        sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return v
+    }
+
+    private func decide(_ j: JoinRequest, _ decision: String) {
+        deciding.insert(j.id)
+        reload()
+        Backend.shared.send("setupCloudDevice", ["id": j.id, "decision": decision], fail: { [weak self] message in
+            self?.deciding.remove(j.id)
+            self?.reload()
+            Toast.show(message)
+        }, done: { _ in
+            Toast.show(decision == "approve" ? "\(j.name) can join now" : "\(j.name) is ignored")
+        })
+    }
+
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let rv = NSTableRowView()
         switch rows[row] {
         case .nav(let p, _, _): rv.setAccessibilityIdentifier(navID(p))
         case .session(let s): rv.setAccessibilityIdentifier("session.\(s.name)")
         case .header(let t): rv.setAccessibilityIdentifier("header.\(t)")
-        case .device(let device, _): rv.setAccessibilityIdentifier("sidebar.device.\(device)")
+        case .device(let device, _, _): rv.setAccessibilityIdentifier("sidebar.device.\(device)")
+        case .join: break   // the cell has join.<name>
         }
         return rv
     }
@@ -606,7 +722,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         switch rows[table.selectedRow] {
         case .nav(let p, _, _): selectedPage = p; onSelect?(p)
         case .session(let s): selectedPage = .session(s.id); onSelect?(.session(s.id))
-        case .header, .device: break
+        case .header, .device, .join: break
         }
     }
 }
@@ -615,10 +731,28 @@ extension SidebarViewController: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let row = table.clickedRow
+        // a helper computer's header: "Update <device>" when it runs an older Thoth (lib/self_update.ts)
+        if row >= 0, case .device(let device, _, let peer) = rows[row] {
+            let item = NSMenuItem(title: "Update \(device)", action: peer?.canUpdate == true ? #selector(updateDevice(_:)) : nil, keyEquivalent: "")
+            item.target = self
+            item.representedObject = device
+            item.setAccessibilityIdentifier("sidebar.device.\(device).update")
+            menu.addItem(item)
+            return
+        }
         guard row >= 0, case .session(let s) = rows[row] else { return }
         let m = SessionMenu.make(for: s, open: { [weak self] in self?.onSelect?(.session(s.id)) },
                                  rename: { SessionMenu.askRename(s) })
         for item in m.items { m.removeItem(item); menu.addItem(item) }
+    }
+}
+
+extension SidebarViewController {
+    /// "Update <device>": the server sends this Mac's Thoth to the helper; the header shows
+    /// "updating…" until the helper is back with the new build (or "update failed").
+    @objc func updateDevice(_ sender: NSMenuItem) {
+        guard let d = sender.representedObject as? String else { return }
+        Backend.shared.post("updateHelper", ["device": d, "updateId": SessionMenu.newFetchId()])
     }
 }
 

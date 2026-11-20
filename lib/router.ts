@@ -17,7 +17,7 @@ const DECISION_PROPS = {
   device: {
     type: 'string',
     description:
-      'for handoff: the device the session is on (from the brain). For new: the computer the user named for the work (a name from Devices), else empty',
+      'for handoff: the device the session is on (from the brain). For new: the computer the user named for the work (a name from Devices), "this mac" for a request about this computer itself, else empty',
   },
   sid: { type: 'string', description: 'for handoff: the session id from the brain (full or first 8 characters)' },
   folder: {
@@ -106,7 +106,7 @@ ${JSON.stringify(devices)}`
     : '';
   const deviceRule = devices.length
     ? `
-- device (for "new"): when the request names a computer for the work ("用家里的电脑", "在 mac-mini 上跑", "on the mini", "use my home computer"), set device to that computer's name from Devices (the closest one: "家里的电脑"/"home computer" is the helper whose name fits best, or the only helper). Otherwise leave device empty: the panel picks the computer itself, never guess one. Take the computer words out of "task" like agent words. With device set, the reason names that computer and the project; it does not say whether the computer is online (the panel checks and adds that). folder stays this Mac's project folder (from the known project folders or the sessions) whenever the project is on this Mac, also when a helper has a copy; the panel moves the work. Only a project that is NOT on this Mac and is in a helper's projects: folder is that project's name exactly as Devices lists it (the panel finds its path).`
+- device (for "new"): when the request names a computer for the work ("用家里的电脑", "在 mac-mini 上跑", "on the mini", "use my home computer"), set device to that computer's name from Devices (the closest one: "家里的电脑"/"home computer" is the helper whose name fits best, or the only helper). A request about this computer itself only makes sense here: its CPU, memory, disk, battery, fan, processes, installed apps, settings, screen, or files outside a project (~/Downloads, ~/Desktop) ("是什么消耗那么多CPU资源", "清理一下磁盘空间", "把 ~/Downloads 里的截图整理一下", "why is my fan so loud", "free up disk space", "which app slows my Mac down"): set device to "this mac", also when the request does not name a computer. Otherwise (portable work such as writing code or a script, research, a project's task) leave device empty: the panel picks the computer itself, never guess one. Take the computer words out of "task" like agent words. With device set, the reason names that computer and the project; it does not say whether the computer is online (the panel checks and adds that). folder stays this Mac's project folder (from the known project folders or the sessions) whenever the project is on this Mac, also when a helper has a copy; the panel moves the work. Only a project that is NOT on this Mac and is in a helper's projects: folder is that project's name exactly as Devices lists it (the panel finds its path).`
     : '';
   const handoffRule = brain
     ? `

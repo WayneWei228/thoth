@@ -12,11 +12,15 @@ final class Backend {
 
     private(set) var sessions: [Session] = []
     private(set) var routes: [Route] = []
+    /// The helper computers (state message `peers`): each one's sidebar header and its update state.
+    private(set) var peers: [PeerInfo] = []
     /// Where new work goes when no session or folder fits (server setting).
     private(set) var defaultFolder = ""
     private(set) var connected = false
     /// The server is building the saved windows again; a saved page waits for its session.
     private(set) var restoring = false
+    /// Computers waiting for the owner's Approve (the sidebar's "Wants to Join").
+    private(set) var joins: [JoinRequest] = []
 
     /// Called on the main thread after every state update.
     var onChange: [() -> Void] = []
@@ -32,13 +36,94 @@ final class Backend {
         return NSHomeDirectory() + "/code/cc-panel"
     }
 
+    /// The folder this app was built from (macos/build-app.sh writes CCPanelRepo); repoDir when unset.
+    var builtFrom: String {
+        if let plist = Bundle.main.object(forInfoDictionaryKey: "CCPanelRepo") as? String, !plist.isEmpty { return plist }
+        return repoDir
+    }
+
     // MARK: server lifecycle
+
+    /// Why the app does not start the server itself (scripts/app-server.ts): the launchd service owns
+    /// it, or this Mac is a helper, or Thoth is installed in another folder. Shown in the window while
+    /// there is no connection; nil = nothing to say.
+    private(set) var serverNote: String?
+    private var askingOwner = false
+    private var lastAsk = Date.distantPast
 
     func start() {
         ping { [weak self] ok in
             guard let self else { return }
-            if ok { self.connect() } else { self.launchServer() }
+            if ok { self.connect() } else { self.askOwner() }
         }
+    }
+
+    /// The server does not answer: ask scripts/app-server.ts who starts it (lib/server_owner.ts). One
+    /// owner per server: with the launchd service installed (or on a helper) the app never starts its
+    /// own, so it cannot take the port from the service. The script returns at once; the answer comes
+    /// in the termination handler (or after 5 s, when it hangs). At most one question every 10 s.
+    private func askOwner() {
+        // the script comes from the folder this app was built from (it always has it), not from
+        // repoDir: an older folder (CC_PANEL_DIR) has no script, and must not get a server by default
+        let script = builtFrom + "/scripts/app-server.ts"
+        guard FileManager.default.fileExists(atPath: script) else {
+            setNote("Thoth cannot check who starts its server: \(script) is missing. Install Thoth again.")
+            scheduleReconnect()
+            return
+        }
+        if askingOwner || Date().timeIntervalSince(lastAsk) < 10 { scheduleReconnect(); return }
+        askingOwner = true
+        lastAsk = Date()
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["node", script, repoDir]
+        p.currentDirectoryURL = URL(fileURLWithPath: builtFrom)
+        p.environment = Instance.serverEnvironment(nodeEnvironment())
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.terminationHandler = { [weak self] _ in
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            DispatchQueue.main.async { self?.ownerAnswered(data, script: script) }
+        }
+        do { try p.run() } catch {
+            askingOwner = false
+            setNote("Thoth could not run node to start its server: \(error.localizedDescription)")
+            scheduleReconnect()
+            return
+        }
+        // the script returns in well under a second; a hung node or launchctl must not stop every
+        // later question: end it after 5 s (the termination handler then clears askingOwner)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
+    }
+
+    private func ownerAnswered(_ data: Data, script: String) {
+        askingOwner = false
+        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        switch o?["action"] as? String {
+        case "spawn":
+            setNote(nil)
+            launchServer()
+        case "launchd", "none":
+            setNote(o?["message"] as? String)
+            scheduleReconnect()
+        default:
+            setNote("Thoth could not check who starts its server (\(script) gave no answer).")
+            scheduleReconnect()
+        }
+    }
+
+    private func setNote(_ note: String?) {
+        guard note != serverNote else { return }
+        serverNote = note
+        notify()
+    }
+
+    private func nodeEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = [NSHomeDirectory() + "/.local/bin", "/opt/homebrew/bin", "/opt/homebrew/opt/node@22/bin",
+                       "/usr/local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""].joined(separator: ":")
+        return env
     }
 
     private func ping(_ done: @escaping (Bool) -> Void) {
@@ -61,10 +146,7 @@ final class Backend {
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = ["node", script]
         p.currentDirectoryURL = URL(fileURLWithPath: repoDir)
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = [NSHomeDirectory() + "/.local/bin", "/opt/homebrew/bin", "/opt/homebrew/opt/node@22/bin",
-                       "/usr/local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""].joined(separator: ":")
-        p.environment = Instance.serverEnvironment(env)
+        p.environment = Instance.serverEnvironment(nodeEnvironment())
         let logDir = Instance.home
         try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         let logPath = logDir + "/server.log"
@@ -114,6 +196,10 @@ final class Backend {
                         let perm = PermissionGuide.Perm(id: id, name: name, pane: pane)
                         DispatchQueue.main.async { PermissionGuide.shared.ask(perm, appPath: o["app"] as? String, session: o["session"] as? String ?? "") }
                     }
+                } else if let data, let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any], o["type"] as? String == "joinNotice",
+                          let jd = try? JSONSerialization.data(withJSONObject: o["join"] ?? [:]), let j = try? JSONDecoder().decode(JoinRequest.self, from: jd) {
+                    // a computer asks to join: once per request id (server.ts announceJoins)
+                    DispatchQueue.main.async { AppDelegate.shared.notifyJoin(j) }
                 } else if let data, let state = try? JSONDecoder().decode(StateMessage.self, from: data) {
                     DispatchQueue.main.async { self.apply(state) }
                 }
@@ -146,7 +232,8 @@ final class Backend {
                  "port: \(port)", "home: \(Instance.home)", "repo: \(repoDir)",
                  "server.ts present: \(fm.fileExists(atPath: repoDir + "/server.ts"))",
                  "server process started by app: \(serverProcess.map { "pid \($0.processIdentifier), running \($0.isRunning)" } ?? "no")",
-                 "connected: \(connected)"]
+                 "connected: \(connected)",
+                 "server note: \(serverNote ?? "none")"]
         if let log = try? String(contentsOfFile: Instance.home + "/server.log", encoding: .utf8) {
             l += ["", "server.log (last 40 lines):"] + log.split(separator: "\n", omittingEmptySubsequences: false).suffix(40).map(String.init)
         } else {
@@ -160,14 +247,19 @@ final class Backend {
     }
 
     private func apply(_ state: StateMessage) {
+        if !connected || serverNote != nil { serverNote = nil; lastKey = "" }
         connected = true
         // ignore updates that only move the activity clock
         let key = state.sessions.map { "\($0.id)|\($0.name)|\($0.state)|\($0.last)|\($0.question)|\($0.options.count)|\($0.title ?? "")|\($0.prompt ?? "")|\($0.branch)|\($0.device ?? "")|\($0.isOffline)|\($0.fetch.map { "\($0.id)/\($0.state)/\($0.step)" } ?? "")" }
             .joined(separator: "\n") + "#" + (state.routes ?? []).map { "\($0.id)|\($0.status)|\($0.target ?? "")" }.joined(separator: ",")
             + "#\(state.restoring == true)"
+            + "#" + (state.peers ?? []).map { "\($0.device)|\($0.online)|\($0.update ?? "")|\($0.error ?? "")" }.joined(separator: ",")
+            + "#" + (state.joins ?? []).map { "\($0.id)|\($0.name)|\($0.os)" }.joined(separator: ",")
         let first = sessions.isEmpty && !state.sessions.isEmpty
         sessions = state.sessions
         restoring = state.restoring ?? false
+        peers = state.peers ?? []
+        joins = state.joins ?? []
         routes = state.routes ?? routes
         if let f = state.defaultFolder { defaultFolder = f }
         if key != lastKey || first {

@@ -1,5 +1,11 @@
 import Foundation
 
+/// What an idle session waits for from the owner (server.ts Waits).
+struct Waits: Codable, Hashable {
+    let kind: String   // "question" | "draft"
+    let text: String
+}
+
 /// One option of a choice menu Claude shows (permission prompt, trust prompt, selection).
 struct Choice: Codable, Hashable {
     let n: Int
@@ -14,10 +20,10 @@ struct Session: Codable, Hashable {
     let folder: String
     let sid: String         // Claude transcript id (for --resume), may be empty
     let running: Bool
-    let state: String       // needs | working | idle | stopped | elsewhere | preparing | failed
+    var state: String       // needs | working | idle | stopped | elsewhere | preparing | failed
     let last: String        // Claude's last reply
-    let options: [Choice]
-    let question: String
+    var options: [Choice]
+    var question: String
     let branch: String
     let prompt: String?     // user's last request
     let title: String?      // AI title of the conversation
@@ -31,6 +37,20 @@ struct Session: Codable, Hashable {
     let preparedAs: String?
     /// The newest "Fetch result" of a helper session (lib/fetch_result.ts).
     let fetch: FetchInfo?
+    /// An idle session that waits for the owner (server.ts Session.waits): its last reply asks a
+    /// question ("question"), or its input box holds text that was never sent ("draft").
+    let waits: Waits?
+
+    /// The app shows a session that waits for the owner like "needs": first, in Needs You, notified,
+    /// with the text and no option buttons. The server keeps it "idle" (it may receive messages).
+    var shown: Session {
+        guard state == "idle", let w = waits else { return self }
+        var s = self
+        s.state = "needs"
+        s.question = w.kind == "draft" ? "Not sent: \(w.text)" : w.text
+        s.options = []
+        return s
+    }
 
     var agentId: String { agent ?? "claude" }
     var isCodex: Bool { agentId == "codex" }
@@ -124,6 +144,10 @@ struct StateMessage: Codable {
     let defaultFolder: String?
     /// The server is building the saved windows again (after a Mac restart or a tmux crash).
     let restoring: Bool?
+    /// The helper computers and whether each needs an update (lib/self_update.ts peerStatus).
+    let peers: [PeerInfo]?
+    /// Computers waiting for the owner's Approve on the cloud brain (lib/join_requests.ts).
+    let joins: [JoinRequest]?
 
     /// One session or request the app cannot read is skipped; it must not drop the whole message.
     /// (2026-11-10: sessions without a name made every state message fail, so the app kept old
@@ -131,11 +155,27 @@ struct StateMessage: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         type = try c.decodeIfPresent(String.self, forKey: .type)
-        sessions = (try c.decode([Lossy<Session>].self, forKey: .sessions)).compactMap(\.value)
+        sessions = (try c.decode([Lossy<Session>].self, forKey: .sessions)).compactMap(\.value?.shown)
         routes = (try c.decodeIfPresent([Lossy<Route>].self, forKey: .routes))?.compactMap(\.value)
         defaultFolder = try c.decodeIfPresent(String.self, forKey: .defaultFolder)
         restoring = try c.decodeIfPresent(Bool.self, forKey: .restoring)
+        peers = (try? c.decodeIfPresent([Lossy<PeerInfo>].self, forKey: .peers))??.compactMap(\.value)
+        joins = (try? c.decodeIfPresent([Lossy<JoinRequest>].self, forKey: .joins))??.compactMap(\.value)
     }
+}
+
+/// A computer that ran `thoth setup --role helper` and waits for Approve (server.ts setJoins).
+struct JoinRequest: Codable, Hashable {
+    let id: String
+    let name: String
+    let os: String
+    let host: String?
+    /// "<name> wants to join" (lib/join_requests.ts title)
+    let title: String
+    /// macOS, Windows, Linux (lib/join_requests.ts osLabel)
+    let system: String
+    /// system, host, when it asked, and the warning (lib/join_requests.ts noticeBody)
+    let notice: String?
 }
 
 /// Decodes a T, or nil when the element is not a valid T (the array goes on).
@@ -186,10 +226,24 @@ struct FetchInfo: Codable, Hashable {
     }
 }
 
-/// A helper computer this panel knows (GET /api/peers): a new session can start there.
+/// A helper computer this panel knows (GET /api/peers, and `peers` in the state message): a new
+/// session can start there. `update`: "needed" (it runs an older Thoth), "updating", "failed" or ""
+/// (lib/self_update.ts peerStatus); `error`: why the last update failed.
 struct PeerInfo: Codable, Hashable {
     let device: String
     let online: Bool
+    var update: String? = nil
+    var error: String? = nil
+
+    /// The sidebar's words after the device name.
+    var note: String? {
+        if update == "updating" { return "updating…" }   // offline for a moment while it restarts
+        var parts: [String] = online ? [] : ["offline"]
+        if update == "needed" { parts.append("update needed") } else if update == "failed" { parts.append("update failed") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+    /// "Update <device>" is offered: it is older, or its last update failed (not while one runs).
+    var canUpdate: Bool { update == "needed" || update == "failed" }
 }
 struct PeerList: Codable {
     let peers: [PeerInfo]

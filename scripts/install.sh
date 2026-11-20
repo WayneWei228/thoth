@@ -98,7 +98,10 @@ if [ "$OS" = Darwin ]; then
   # /usr/bin/swift exists on every Mac: without the Command Line Tools it is only a stub that fails.
   # So ask xcode-select (found on a cloud Mac with the tools removed: the build failed and the
   # message did not say why).
-  if xcode-select -p >/dev/null 2>&1 && command -v swift >/dev/null; then "$ROOT/macos/build-app.sh" || say "The Mac app did not build; the web panel still works ('thoth web')."
+  if xcode-select -p >/dev/null 2>&1 && command -v swift >/dev/null; then
+    # a running app is old code (maybe from another install folder): restart it (scripts/restart-app.sh)
+    if "$ROOT/macos/build-app.sh"; then "$ROOT/scripts/restart-app.sh"
+    else say "The Mac app did not build; the web panel still works ('thoth web')."; fi
   else say "The Xcode Command Line Tools are missing, so the Mac app is skipped. Install them, then run this again:
     xcode-select --install
   (the web panel works without them: 'thoth web')"; fi

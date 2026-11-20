@@ -235,21 +235,63 @@ export function describe(c: PmsetChange): string {
   return `start again after a power failure (autorestart) is now ${on}`;
 }
 
+/** The admin accounts of this Mac (not root). The name goes into a command the person copies, so
+ * only plain account names are kept. */
+function adminNames(d: Deps): string[] {
+  const r = d.run('/usr/bin/dscl', ['.', '-read', '/Groups/admin', 'GroupMembership']);
+  const names =
+    r.code === 0
+      ? r.stdout
+          .replace(/^GroupMembership:/, '')
+          .trim()
+          .split(/\s+/)
+      : [];
+  const admins = names.filter((n) => n !== '' && n !== 'root' && /^[A-Za-z_][\w.-]*$/.test(n));
+  return admins;
+}
+
+/** This user may not run sudo at all (not an admin): the password would not help. */
+function notAdminError(d: Deps, changes: readonly PmsetChange[], again: string): Error {
+  const user = d.run('/usr/bin/id', ['-un']).stdout.trim() || 'this user';
+  const cmds = changes.map((c) => `sudo ${d.pmset} ${c.scope} ${c.key} ${c.value}`).join(' && ');
+  const admins = adminNames(d);
+  const admin = admins.length === 1 && admins[0] !== undefined ? admins[0] : '<admin>';
+  // pasted unchanged, `<admin>` is a shell redirection: say what to put there
+  const pick =
+    admin !== '<admin>'
+      ? ''
+      : admins.length > 0
+        ? `Replace <admin> with one of: ${admins.join(', ')}.\n`
+        : 'Replace <admin> with the name of an admin account of this Mac.\n';
+  return new Error(
+    `this user (${user}) is not an admin of this Mac, so it cannot change the power settings. The power settings were not changed. ` +
+      `Ask an admin of this Mac to run this in the Terminal app (it asks for the admin's password):\n` +
+      `  su ${admin} -c '${cmds}'\n` +
+      pick +
+      `Then run again: ${again}`,
+  );
+}
+
 /** Runs the pmset calls with sudo. The password is asked once (`sudo -v`), before the first call.
- * Without a terminal sudo cannot ask: then only a sudo that needs no password goes on; else the error
- * says to run `again` in the Terminal app (the setup prompt tells the person that). */
+ * First `sudo -n -v` (no prompt): it works when sudo needs no password now, and it tells a user who
+ * may not run sudo at all (not an admin); then the error names the commands for an admin. Without a
+ * terminal sudo cannot ask: then the error says to run `again` in the Terminal app (the setup prompt
+ * tells the person that). */
 function applyPmset(d: Deps, changes: readonly PmsetChange[], again: string): void {
   if (changes.length === 0) {
     d.log('   Nothing to change: the power settings were already right. No password was needed.');
     return;
   }
-  d.log('Changing power settings needs your password once (sudo).');
-  if (d.tty === false) {
-    if (d.run(d.sudo, ['-n', '-v']).code !== 0)
+  const probe = d.run(d.sudo, ['-n', '-v']);
+  if (probe.code !== 0) {
+    if (/may not run sudo|not in the sudoers/i.test(probe.stderr)) throw notAdminError(d, changes, again);
+    if (d.tty === false)
       throw new Error(
         `the power settings need your Mac password, and this window has no terminal to ask for it. The power settings were not changed. Open the Terminal app and run: ${again}`,
       );
-  } else if (d.run(d.sudo, ['-v'], true).code !== 0) throw new Error('sudo was not allowed; nothing was changed');
+    d.log('Changing power settings needs your password once (sudo).');
+    if (d.run(d.sudo, ['-v'], true).code !== 0) throw new Error('sudo was not allowed; nothing was changed');
+  }
   try {
     for (const c of changes) {
       const r = d.run(d.sudo, ['-n', d.pmset, c.scope, c.key, c.value]);
