@@ -134,6 +134,36 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     private var lastState: [String: SessionState] = [:]
     private var selectedPage: Page = .home
     private var suppress = false
+    // Select mode: the user ticks sessions and closes them together (the "Select" button by "Recent").
+    private(set) var selecting = false
+    private(set) var checked: Set<String> = []
+    // AI tidy: the reason for each suggestion (shown under the name in select mode)
+    private var hints: [String: String] = [:]
+    // the sessions the AI ticked (not the user): only these are unticked when they start working
+    private var aiTicked: Set<String> = []
+    private var tidying = false
+    private let bar = NSView()
+    private var barHeight: NSLayoutConstraint!
+    private let barLabel = label("", size: 11, color: .secondaryLabelColor)
+    private lazy var closeBtn: NSButton = {
+        let b = NSButton(title: "Close", target: self, action: #selector(closeChecked))
+        b.bezelStyle = .rounded; b.controlSize = .small
+        b.setAccessibilityIdentifier("sidebar.closeSelected")
+        return b
+    }()
+    // "Done" in the bar too: the one by "Recent" goes away when no session is left under that header
+    private lazy var doneBtn: NSButton = {
+        let b = NSButton(title: "Done", target: self, action: #selector(toggleSelecting))
+        b.bezelStyle = .rounded; b.controlSize = .small
+        b.setAccessibilityIdentifier("sidebar.selectDone")
+        return b
+    }()
+    private lazy var allBtn: NSButton = {
+        let b = NSButton(title: "All", target: self, action: #selector(checkAll))
+        b.bezelStyle = .rounded; b.controlSize = .small
+        b.setAccessibilityIdentifier("sidebar.selectAll")
+        return b
+    }()
 
     override func loadView() {
         let scroll = NSScrollView()
@@ -148,6 +178,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         table.dataSource = self
         table.delegate = self
         table.target = self
+        table.action = #selector(rowClicked)   // select mode ticks on a click (no row is selectable then)
         table.menu = NSMenu()
         table.menu?.delegate = self
         scroll.documentView = table
@@ -182,6 +213,24 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         settingsBtn.setAccessibilityIdentifier("sidebar.settings")
         settingsBtn.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(brand); root.addSubview(newBtn); root.addSubview(scroll); root.addSubview(settingsBtn)
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.wantsLayer = true
+        bar.setAccessibilityIdentifier("sidebar.selectBar")
+        let line = NSBox(); line.boxType = .separator; line.translatesAutoresizingMaskIntoConstraints = false
+        for v in [line, barLabel, allBtn, closeBtn, doneBtn] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; bar.addSubview(v) }
+        root.addSubview(bar)
+        barHeight = bar.heightAnchor.constraint(equalToConstant: 0)
+        bar.isHidden = true
+        NSLayoutConstraint.activate([
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor), bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bar.bottomAnchor.constraint(equalTo: root.bottomAnchor), barHeight,
+            line.topAnchor.constraint(equalTo: bar.topAnchor), line.leadingAnchor.constraint(equalTo: bar.leadingAnchor), line.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            barLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12), barLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            doneBtn.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -10), doneBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            closeBtn.trailingAnchor.constraint(equalTo: doneBtn.leadingAnchor, constant: -6), closeBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            allBtn.trailingAnchor.constraint(equalTo: closeBtn.leadingAnchor, constant: -6), allBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            barLabel.trailingAnchor.constraint(lessThanOrEqualTo: allBtn.leadingAnchor, constant: -6),
+        ])
         NSLayoutConstraint.activate([
             brand.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
             mark.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 80),
@@ -195,7 +244,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: settingsBtn.topAnchor, constant: -6),
             settingsBtn.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            settingsBtn.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            settingsBtn.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -12),
         ])
         view = root
         reload()
@@ -204,8 +253,86 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
     @objc private func newSession() { AppDelegate.shared.window.showNewSession() }
     @objc private func openSettings() { SettingsWindowController.shared.present() }
 
+    // MARK: Select mode
+
+    @objc func toggleSelecting() { setSelecting(!selecting) }
+
+    func setSelecting(_ on: Bool, checked ids: Set<String> = []) {
+        selecting = on
+        checked = on ? ids : []
+        if !on { hints = [:]; aiTicked = [] }
+        reload()
+    }
+
+    /// AI tidy: the server asks Claude which sessions are one-off tasks that are done; they are
+    /// ticked in select mode with the reason under each name. The user closes them with "Close N".
+    @objc func tidy() {
+        guard !tidying else { return }
+        tidying = true
+        reload()
+        Backend.shared.send("tidy", [:], fail: { [weak self] msg in
+            self?.tidying = false; self?.reload(); Toast.show(msg)
+        }) { [weak self] json in
+            guard let self else { return }
+            self.tidying = false
+            let list = json["sessions"] as? [[String: Any]] ?? []
+            var close: Set<String> = []
+            var hints: [String: String] = [:]
+            for d in list {
+                guard let id = d["id"] as? String else { continue }
+                if let r = d["reason"] as? String, !r.isEmpty { hints[id] = r }
+                if d["close"] as? Bool == true { close.insert(id) }
+            }
+            self.setSelecting(true, checked: close)
+            self.hints = hints
+            self.aiTicked = close
+            self.reload()
+        }
+    }
+
+    @objc private func checkBox(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        toggle(id)
+    }
+
+    private func toggle(_ id: String) {
+        if checked.contains(id) { checked.remove(id) } else { checked.insert(id) }
+        aiTicked.remove(id)   // the user decided this one now
+        reload()
+    }
+
+    @objc private func checkAll() {
+        let ids = Set(Backend.shared.sessions.map(\.id))
+        checked = checked == ids ? [] : ids
+        aiTicked = []   // the user's choice now
+        reload()
+    }
+
+    /// Closes every ticked session (each one like "Close" in its menu: no confirmation, the
+    /// conversation is saved and can be resumed).
+    @objc func closeChecked() {
+        for s in Backend.shared.sessions where checked.contains(s.id) { SessionMenu.close(s) }
+        setSelecting(false)
+    }
+
+    private func updateBar() {
+        bar.isHidden = !selecting
+        barHeight.constant = selecting ? 40 : 0
+        let n = checked.count
+        barLabel.stringValue = n == 0 ? (hints.isEmpty ? "Tick sessions to close" : "AI: nothing to close") : "\(n) selected"
+        closeBtn.title = n == 0 ? "Close" : "Close \(n)"
+        closeBtn.isEnabled = n > 0
+        allBtn.title = checked.count == Backend.shared.sessions.count && n > 0 ? "None" : "All"
+    }
+
     func reload() {
         let sessions = Backend.shared.sessions
+        checked.formIntersection(sessions.map(\.id))  // a session that closed is no longer ticked
+        if selecting && sessions.isEmpty { selecting = false; hints = [:]; aiTicked = [] }   // nothing left to tick
+        // AI tidy ticked it, then it started working or asked for the user: untick it, so Close N never
+        // interrupts a turn the AI judged on an older snapshot (the check box hides the status dot)
+        // (only the AI's ticks: a session the user ticks by hand stays ticked)
+        for x in sessions where aiTicked.contains(x.id) && (x.sessionState == .working || x.sessionState == .needs) { checked.remove(x.id); aiTicked.remove(x.id) }
         let needs = sessions.filter { $0.sessionState == .needs }
         var r: [SideRow] = [
             .nav(.home, "New Request", "square.and.pencil"),
@@ -229,6 +356,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             r += rest.map { .session($0) }
         }
         rows = r
+        if isViewLoaded { updateBar() }
         suppress = true
         table.reloadData()
         select(selectedPage)
@@ -245,7 +373,9 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             }
         }
         suppress = true
-        if let idx { table.selectRowIndexes([idx], byExtendingSelection: false) } else { table.deselectAll(nil) }
+        // select mode: no row is highlighted (rows cannot be selected then)
+        if selecting { table.deselectAll(nil) }
+        else if let idx { table.selectRowIndexes([idx], byExtendingSelection: false) } else { table.deselectAll(nil) }
         suppress = false
     }
 
@@ -260,12 +390,15 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         switch rows[row] {
         case .header: return 26
         case .nav: return 30
-        case .session(let s): return (s.title?.isEmpty == false) ? 44 : 30
+        case .session(let s): return (s.title?.isEmpty == false || (selecting && hints[s.id] != nil)) ? 44 : 30
         }
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         if case .header = rows[row] { return false }
+        // select mode: no row can be selected. A mouse click ticks through rowClicked; with VoiceOver the
+        // row's check box (a button) ticks; arrow keys do nothing, drags tick nothing.
+        if selecting { return false }
         return true
     }
 
@@ -282,12 +415,38 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         return v
     }
 
+    private var firstSessionHeader: String? {
+        for r in rows { if case .header(let t) = r { return t } }
+        return nil
+    }
+
     private func cellView(_ row: Int) -> NSView? {
         switch rows[row] {
         case .header(let t):
             let l = label(t, size: 11, weight: .semibold, color: .tertiaryLabelColor)
             let v = NSView(); v.addSubview(l)
             NSLayoutConstraint.activate([l.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8), l.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -4)])
+            // Select/Done and Tidy on the first session header ("Needs You" when every session needs you)
+            if t == firstSessionHeader {
+                let tb = NSButton(title: tidying ? "Tidying…" : "Tidy", target: self, action: #selector(tidy))
+                tb.isBordered = false
+                tb.isEnabled = !tidying
+                tb.font = .systemFont(ofSize: 11, weight: .medium)
+                tb.contentTintColor = Theme.accent
+                tb.toolTip = "AI suggests which sessions to close (one-off tasks that are done)"
+                tb.setAccessibilityIdentifier("sidebar.tidy")
+                tb.translatesAutoresizingMaskIntoConstraints = false
+                v.addSubview(tb)
+                let b = NSButton(title: selecting ? "Done" : "Select", target: self, action: #selector(toggleSelecting))
+                b.isBordered = false
+                b.font = .systemFont(ofSize: 11, weight: .medium)
+                b.contentTintColor = Theme.accent
+                b.setAccessibilityIdentifier("sidebar.select")
+                b.translatesAutoresizingMaskIntoConstraints = false
+                v.addSubview(b)
+                NSLayoutConstraint.activate([b.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8), b.firstBaselineAnchor.constraint(equalTo: l.firstBaselineAnchor),
+                                             tb.trailingAnchor.constraint(equalTo: b.leadingAnchor, constant: -10), tb.firstBaselineAnchor.constraint(equalTo: l.firstBaselineAnchor)])
+            }
             return v
         case .nav(_, let title, let symbol):
             let v = NSTableCellView()
@@ -305,14 +464,24 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             return v
         case .session(let s):
             let v = NSTableCellView()
-            let dot = StatusDot(); dot.state = s.sessionState
+            let dot: NSView
+            if selecting {
+                let cb = NSButton(checkboxWithTitle: "", target: self, action: #selector(checkBox(_:)))
+                cb.state = checked.contains(s.id) ? .on : .off
+                cb.identifier = NSUserInterfaceItemIdentifier(s.id)
+                cb.setAccessibilityIdentifier("select.\(s.name)")
+                cb.translatesAutoresizingMaskIntoConstraints = false
+                dot = cb
+            } else {
+                let d = StatusDot(); d.state = s.sessionState; dot = d
+            }
             let name = label(s.name, size: 13, weight: .medium)
             let time = label(s.sessionState == .needs ? "Needs you" : ago(s.activity), size: 11, color: s.sessionState == .needs ? Theme.red : .tertiaryLabelColor)
             time.setContentCompressionResistancePriority(.required, for: .horizontal)
             v.addSubview(dot); v.addSubview(name); v.addSubview(time)
             var cons = [
-                dot.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 10),
-                name.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 10),
+                dot.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: selecting ? 6 : 10),
+                name.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: selecting ? 6 : 10),
                 time.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8),
                 time.firstBaselineAnchor.constraint(equalTo: name.firstBaselineAnchor),
             ]
@@ -326,8 +495,9 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             } else {
                 cons.append(name.trailingAnchor.constraint(lessThanOrEqualTo: time.leadingAnchor, constant: -6))
             }
-            if let t = s.title, !t.isEmpty {
-                let sub = label(t, size: 11, color: .secondaryLabelColor)
+            let hint = selecting ? hints[s.id] : nil
+            if let t = hint ?? s.title, !t.isEmpty {
+                let sub = label(t, size: 11, color: hint != nil ? (checked.contains(s.id) ? Theme.red : Theme.green) : .secondaryLabelColor)
                 v.addSubview(sub)
                 cons += [
                     name.topAnchor.constraint(equalTo: v.topAnchor, constant: 5),
@@ -355,8 +525,16 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         return rv
     }
 
+    /// Select mode: a click on a session row (also the open session's) ticks or unticks it.
+    @objc private func rowClicked() {
+        let row = table.clickedRow
+        guard selecting, row >= 0, row < rows.count, case .session(let s) = rows[row] else { return }
+        toggle(s.id)
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !suppress, table.selectedRow >= 0 else { return }
+        if selecting { return }   // rows cannot be selected in select mode (shouldSelectRow)
         switch rows[table.selectedRow] {
         case .nav(let p, _, _): selectedPage = p; onSelect?(p)
         case .session(let s): selectedPage = .session(s.id); onSelect?(.session(s.id))

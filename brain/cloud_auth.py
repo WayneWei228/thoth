@@ -16,7 +16,7 @@ import secrets
 import threading
 import time
 
-ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O, 1/I (same alphabet as lib/devices.js)
+ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O, 1/I (same alphabet as lib/devices.ts)
 CODE_TTL = 15 * 60
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 ID_RE = re.compile(r"^d[0-9a-f]{16}$")

@@ -43,12 +43,13 @@ if [ "$OS" != Darwin ]; then
 fi
 say "The tools the panel needs are here."
 
-step "2/5 Node.js 22 (the panel's runtime)"
+step "2/5 Node.js 22.18+ (the panel's runtime; it runs the TypeScript files directly)"
 NODE=""
 for cand in "$SHARE/node/bin/node" "$(command -v node 2>/dev/null)"; do
   [ -n "$cand" ] && [ -x "$cand" ] || continue
-  major=$("$cand" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
-  if [ "$major" -ge 22 ] 2>/dev/null; then NODE="$cand"; break; fi
+  # 22.18 is the first Node 22 that strips TypeScript types by default (server.ts runs without a build)
+  ok=$("$cand" -p 'const [a,b]=process.versions.node.split(".").map(Number); a>22||(a===22&&b>=18)?1:0' 2>/dev/null || echo 0)
+  if [ "$ok" = 1 ]; then NODE="$cand"; break; fi
 done
 if [ -z "$NODE" ]; then
   case "$OS-$ARCH" in
@@ -56,7 +57,7 @@ if [ -z "$NODE" ]; then
     Linux-x86_64) plat=linux-x64 ;; Linux-aarch64|Linux-arm64) plat=linux-arm64 ;;
     *) die "no Node.js 22 build for $OS $ARCH. Install Node.js 22 yourself (https://nodejs.org), then run this again." ;;
   esac
-  say "No Node.js 22 found (system: $(node --version 2>/dev/null || echo none)). Downloading the official Node.js 22 for this user only..."
+  say "No Node.js 22.18 or newer found (system: $(node --version 2>/dev/null || echo none)). Downloading the official Node.js 22 for this user only..."
   base="https://nodejs.org/dist/latest-v22.x"
   sums=$(curl -fsSL "$base/SHASUMS256.txt") || die "cannot reach nodejs.org. Check the internet connection, or install Node.js 22 yourself."
   file=$(printf '%s\n' "$sums" | awk '{print $2}' | grep -E "^node-v22\.[0-9.]+-$plat\.tar\.gz$" | head -1)

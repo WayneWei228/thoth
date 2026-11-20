@@ -38,7 +38,7 @@ start_server() {
   # No `nohup`: on a Mac reached over SSH with nobody logged in at the screen, macOS nohup stops
   # with "can't detach from console" and the server never starts (found on a clean cloud Mac,
   # a test run). An ignored HUP is inherited through exec: same effect.
-  (cd "$APP_DIR" && trap '' HUP && exec "$NODE" "$APP_DIR/server.js" >>"$LOG" 2>&1 </dev/null &) >/dev/null 2>&1 </dev/null
+  (cd "$APP_DIR" && trap '' HUP && exec "$NODE" "$APP_DIR/server.ts" >>"$LOG" 2>&1 </dev/null &) >/dev/null 2>&1 </dev/null
   for _ in $(seq 1 50); do up && return 0; sleep 0.1; done
   echo "Server did not start. See $LOG"; exit 1
 }

@@ -1,10 +1,11 @@
 {
   "name": "claude-panel",
   "version": "0.4.0",
+  "type": "module",
   "description": "One panel for many Claude Code sessions: tmux keeps them alive, a UI shows and controls them, and a router sends each request to the right session.",
-  "main": "server.js",
+  "main": "server.ts",
   "scripts": {
-    "start": "node server.js",
+    "start": "node server.ts",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true"
   },
   "license": "MIT",

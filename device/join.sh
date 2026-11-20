@@ -1,7 +1,7 @@
 #!/bin/sh
 # Join this computer (macOS or Linux) to the user's brain. Served by the brain (a cloud brain, or
 # the device listener of a brain computer on the same network):
-# The setup page shows the exact one-line command (lib/devices.js posixJoin: download to a new
+# The setup page shows the exact one-line command (lib/devices.ts posixJoin: download to a new
 # mktemp file, run it, remove it). Arguments:
 #   --hub https://<cloud brain> [code] [name]     (a cloud brain)
 #   <code> [name]                                 (a brain computer on the same network)

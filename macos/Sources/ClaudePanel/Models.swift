@@ -75,7 +75,7 @@ struct Route: Codable, Hashable {
     let choices: [RouteChoice]?
     let folder: String?
     let newName: String?
-    let parent: String?     // one task of a request the router split into several (server.js route)
+    let parent: String?     // one task of a request the router split into several (server.ts route)
     let part: String?       // "1/3"
     let tasks: [String]?    // a split request: the route ids of its tasks
 

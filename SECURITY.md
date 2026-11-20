@@ -13,7 +13,7 @@ Include:
 ## What is in scope
 
 - The panel server (port 7878) and the brain (port 7879). Both listen on 127.0.0.1 unless you turn on remote access.
-- The remote listener for the iPhone app and the pairing token.
+- The remote listener for a remote client and the pairing token.
 - A self-hosted cloud brain (`brain/deploy/`): the owner token, device join requests, the transport.
 - The collector on each device: it is read-only and removes secrets from what it sends.
 - The installer (`install.sh`): it checks the SHA-256 of the download.

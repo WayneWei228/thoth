@@ -354,6 +354,8 @@ $HOST {
 		header Content-Type "text/plain; charset=utf-8"
 		file_server
 	}
+	# the Thoth relay's route, when the relay's installer wrote it (a glob: no file, no route)
+	import /etc/caddy/thoth-relay*.caddy
 	handle /device/* {
 		respond 404
 	}
@@ -375,6 +377,10 @@ $HOST {
 		}
 	}
 }
+
+# the sites of other Thoth services on this server (the relay's installer writes one for a public
+# relay; a glob: no file, no site)
+import /etc/caddy/thoth-site-*.caddy
 EOF
 } > /etc/caddy/Caddyfile.new
 install -d -o caddy -g caddy -m 0750 /var/log/caddy

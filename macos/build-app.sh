@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the native app (Swift + AppKit). The app uses server.js from this repository.
+# Build the native app (Swift + AppKit). The app uses server.ts from this repository.
 #   macos/build-app.sh [release|debug]   build "Thoth.app" and install it in ~/Applications
 #   macos/build-app.sh --no-install      build "Thoth.app" in macos/build only (verify copies it;
 #                                        the installed app is not touched)
@@ -57,6 +57,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Thoth lets your remote client reach this Mac on the same Wi-Fi (only when you turn on remote access).</string>
   <key>CCPanelRepo</key><string>$REPO</string>
   <key>CCPanelPort</key><string>$PORT</string>
   <key>CCPanelURLScheme</key><string>$SCHEME</string>

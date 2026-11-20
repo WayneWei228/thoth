@@ -371,7 +371,7 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
 }
 
 
-/// Messages from the chat page (public/chat.js toNative): clipboard and
+/// Messages from the chat page (public/chat.ts toNative): clipboard and
 /// downloads are done by the app, because WKWebView limits the page APIs.
 final class ChatBridge: NSObject, WKScriptMessageHandler {
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {

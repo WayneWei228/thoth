@@ -267,7 +267,7 @@ def panel_post(action, body):
 
 def run_panel(target, name, message, agent="claude"):
     """Open the panel session with the source session's agent. A Codex session in the panel always
-    gets the brain tools (server.js startCodex); a Claude session gets them with mcp=brain."""
+    gets the brain tools (server.ts startCodex); a Claude session gets them with mcp=brain."""
     body = {"folder": target, "name": name[:30]}
     if agent == "codex":
         body["agent"] = "codex"

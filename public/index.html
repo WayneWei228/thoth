@@ -44,7 +44,7 @@
       <div id="grid" class="grid"></div>
       <div id="empty" class="empty hidden">
         <p>No sessions yet.</p>
-        <button class="btn primary" onclick="openNew()">+ Start your first session</button>
+        <button class="btn primary" id="btn-first-session">+ Start your first session</button>
       </div>
     </section>
 
@@ -90,7 +90,7 @@
 
 <div id="modal" class="modal hidden">
   <div class="modal-card">
-    <header><h3>New session</h3><button class="x" onclick="closeModal()">✕</button></header>
+    <header><h3>New session</h3><button class="x" id="modal-close">✕</button></header>
     <div class="step">
       <div class="label">1. Project folder</div>
       <div class="folder-row">
@@ -121,6 +121,6 @@
 <script src="/xterm.js"></script>
 <script src="/addon-fit.js"></script>
 <script src="/addon-web-links.js"></script>
-<script src="/app.js"></script>
+<script type="module" src="/app.js"></script>
 </body>
 </html>

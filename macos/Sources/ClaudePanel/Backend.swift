@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// Talks to the Node backend (server.js): starts it when needed, streams state
+/// Talks to the Node backend (server.ts): starts it when needed, streams state
 /// over WebSocket, and sends actions over HTTP. All callbacks run on the main thread.
 final class Backend {
     static let shared = Backend()
@@ -23,7 +23,7 @@ final class Backend {
     private var serverProcess: Process?
     private var lastKey = ""
 
-    /// Folder that holds server.js (the repository root).
+    /// Folder that holds server.ts (the repository root).
     var repoDir: String {
         if let env = ProcessInfo.processInfo.environment["CC_PANEL_DIR"] { return env }
         if let plist = Bundle.main.object(forInfoDictionaryKey: "CCPanelRepo") as? String, !plist.isEmpty { return plist }
@@ -49,9 +49,9 @@ final class Backend {
     }
 
     private func launchServer() {
-        let script = repoDir + "/server.js"
+        let script = repoDir + "/server.ts"
         guard FileManager.default.fileExists(atPath: script) else {
-            NSLog("Thoth: server.js not found at \(script)")
+            NSLog("Thoth: server.ts not found at \(script)")
             scheduleReconnect()
             return
         }
@@ -106,7 +106,7 @@ final class Backend {
                 @unknown default: break
                 }
                 if let data, let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any], o["type"] as? String == "permAsk" {
-                    // a session needs a macOS permission (server.js onPermNeed): ask the user first
+                    // a session needs a macOS permission (server.ts onPermNeed): ask the user first
                     if let p = o["perm"] as? [String: Any], let id = p["id"] as? String, let name = p["name"] as? String,
                        let pane = p["pane"] as? String, pane.hasPrefix("x-apple.systempreferences:") {
                         let perm = PermissionGuide.Perm(id: id, name: name, pane: pane)
@@ -142,7 +142,7 @@ final class Backend {
                  "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
                  "app version: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")",
                  "port: \(port)", "home: \(Instance.home)", "repo: \(repoDir)",
-                 "server.js present: \(fm.fileExists(atPath: repoDir + "/server.js"))",
+                 "server.ts present: \(fm.fileExists(atPath: repoDir + "/server.ts"))",
                  "server process started by app: \(serverProcess.map { "pid \($0.processIdentifier), running \($0.isRunning)" } ?? "no")",
                  "connected: \(connected)"]
         if let log = try? String(contentsOfFile: Instance.home + "/server.log", encoding: .utf8) {

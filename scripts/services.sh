@@ -179,12 +179,12 @@ install_linux() {
   [ -n "$NODE_BIN" ] && [ -n "$PY_BIN" ] || die "Node.js 22 or python3 is missing. Run: $APP_DIR/scripts/install.sh"
   mkdir -p "$dir"
   [ -z "$dry" ] && { mkdir -p "$STATE" "$BRAIN_HOME"; ensure_brain_devices; }
-  write_unit "$dir/claude-panel-server.service" "Thoth server" "$(server_path)" "$STATE/server.log" "$NODE_BIN" "$APP_DIR/server.js"
+  write_unit "$dir/claude-panel-server.service" "Thoth server" "$(server_path)" "$STATE/server.log" "$NODE_BIN" "$APP_DIR/server.ts"
   write_unit "$dir/claude-panel-brain.service" "Thoth brain" "$(brain_path)" "$BRAIN_HOME/brain.log" "$PY_BIN" -I "$APP_DIR/brain/brain.py" serve
   say "Wrote claude-panel-server.service and claude-panel-brain.service in $dir"
   [ -n "$dry" ] && { say "(dry run: nothing was started or enabled)"; return 0; }
   # a server or brain started by hand holds the ports; hand them over to the services
-  stop_manual "$PORT" "server.js"; stop_manual "$BPORT" "brain.py"; sleep 1
+  stop_manual "$PORT" "server\.[jt]s"; stop_manual "$BPORT" "brain.py"; sleep 1
   sysd daemon-reload || die "systemctl --user daemon-reload failed."
   sysd enable --now claude-panel-server.service claude-panel-brain.service 2>&1 | sed 's/^/  /'
   # linger: user services start at boot and keep running after logout
@@ -221,7 +221,7 @@ install_mac() {
   [ -n "$NODE_BIN" ] && [ -n "$PY_BIN" ] || die "Node.js 22 or python3 is missing. Run: $APP_DIR/scripts/install.sh"
   mkdir -p "$dir"
   [ -z "$dry" ] && { mkdir -p "$STATE" "$BRAIN_HOME"; ensure_brain_devices; }
-  write_plist "$dir/${MAC_LABELS[0]}.plist" "${MAC_LABELS[0]}" "$(server_path)" "$STATE/server.log" "$NODE_BIN" "$APP_DIR/server.js"
+  write_plist "$dir/${MAC_LABELS[0]}.plist" "${MAC_LABELS[0]}" "$(server_path)" "$STATE/server.log" "$NODE_BIN" "$APP_DIR/server.ts"
   write_plist "$dir/${MAC_LABELS[1]}.plist" "${MAC_LABELS[1]}" "$(brain_path)" "$BRAIN_HOME/brain.log" "$PY_BIN" -I "$APP_DIR/brain/brain.py" serve
   local l
   if command -v plutil >/dev/null 2>&1; then
@@ -234,7 +234,7 @@ install_mac() {
     launchctl bootout "$(dom)/$LEGACY_MAC_LABEL" 2>/dev/null; rm -f "$AGENT_DIR/$LEGACY_MAC_LABEL.plist"
     say "Replaced the old agent $LEGACY_MAC_LABEL."
   fi
-  stop_manual "$PORT" "server.js"; stop_manual "$BPORT" "brain.py"; sleep 1
+  stop_manual "$PORT" "server\.[jt]s"; stop_manual "$BPORT" "brain.py"; sleep 1
   for l in "${MAC_LABELS[@]}"; do
     mac_bootout "$l"
     launchctl bootstrap "$(dom)" "$dir/$l.plist" || die "launchctl could not load $l. Run: thoth doctor"
@@ -311,7 +311,7 @@ warn() { printf '  warn  %s\n        %s\n' "$1" "$2"; }
 
 fix_server() {
   if installed; then ctl restart server; else
-    ( cd "$APP_DIR" && trap '' HUP && exec "$NODE_BIN" "$APP_DIR/server.js" >>"$STATE/server.log" 2>&1 </dev/null & ) >/dev/null 2>&1   # no nohup: see bin/thoth start_server
+    ( cd "$APP_DIR" && trap '' HUP && exec "$NODE_BIN" "$APP_DIR/server.ts" >>"$STATE/server.log" 2>&1 </dev/null & ) >/dev/null 2>&1   # no nohup: see bin/thoth start_server
   fi
   wait_for server_up 40
 }
@@ -351,14 +351,15 @@ claude_logged_in() {
 
 doctor_pass() {
   BAD=0; FIXES=()
-  local v major
+  local v major minor
   # Node
   if [ -z "$NODE_BIN" ]; then
-    bad "Node.js is missing" "The panel server needs Node.js 22 or newer." "$APP_DIR/scripts/install.sh   (downloads Node.js 22 for you)"
+    bad "Node.js is missing" "The panel server needs Node.js 22.18 or newer." "$APP_DIR/scripts/install.sh   (downloads Node.js 22 for you)"
   else
-    v=$("$NODE_BIN" --version 2>/dev/null); major=${v#v}; major=${major%%.*}
-    if [ "${major:-0}" -ge 22 ] 2>/dev/null; then ok "Node.js $v ($NODE_BIN)"
-    else bad "Node.js $v is too old" "The panel server needs Node.js 22 or newer." "$APP_DIR/scripts/install.sh   (downloads Node.js 22 for you, no sudo)"; fi
+    v=$("$NODE_BIN" --version 2>/dev/null); major=${v#v}; minor=${major#*.}; major=${major%%.*}; minor=${minor%%.*}
+    # 22.18+: Node runs the panel's TypeScript files directly (type stripping)
+    if [ "${major:-0}" -gt 22 ] 2>/dev/null || { [ "${major:-0}" -eq 22 ] && [ "${minor:-0}" -ge 18 ]; } 2>/dev/null; then ok "Node.js $v ($NODE_BIN)"
+    else bad "Node.js $v is too old" "The panel server needs Node.js 22.18 or newer." "$APP_DIR/scripts/install.sh   (downloads Node.js 22 for you, no sudo)"; fi
   fi
   # tmux
   if command -v tmux >/dev/null 2>&1; then ok "tmux $(tmux -V 2>/dev/null | awk '{print $2}')"

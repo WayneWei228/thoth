@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         setup.present(mode)
     }
 
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// Switch the look now: save it, then build the main window again on the same page (views read

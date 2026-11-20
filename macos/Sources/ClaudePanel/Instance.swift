@@ -1,6 +1,6 @@
 import AppKit
 
-/// Instance settings (same meaning as lib/instance.js). The installed app has
+/// Instance settings (same meaning as lib/instance.ts). The installed app has
 /// none of these keys and uses the defaults. A verify instance is a copy of the
 /// app whose Info.plist sets them, so it runs with its own server port, tmux
 /// server and state folder, and never touches the user's sessions.
@@ -47,7 +47,7 @@ enum Instance {
         env["CC_PANEL_HOME"] = home
         env["CC_PANEL_URL_SCHEME"] = urlScheme
         if let s = tmuxSocket { env["CC_PANEL_TMUX_SOCKET"] = s } else { env.removeValue(forKey: "CC_PANEL_TMUX_SOCKET") }
-        // a test instance (verify): the server then starts Claude without Remote Control (lib/claude_args.js)
+        // a test instance (verify): the server then starts Claude without Remote Control (lib/claude_args.ts)
         if let tag = value("CCPanelInstance", "CC_PANEL_INSTANCE") { env["CC_PANEL_INSTANCE"] = tag } else { env.removeValue(forKey: "CC_PANEL_INSTANCE") }
         // a test instance can give its server more settings (its own brain port, device port, and its own
         // CODEX_HOME so Codex's trust choices never reach the user's ~/.codex): Info.plist CCPanelEnv

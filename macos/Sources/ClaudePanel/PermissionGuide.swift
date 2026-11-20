@@ -6,7 +6,7 @@ import AppKit
 /// It checks the state every second (GET /api/permissions, the probe that runs in the sessions' tmux
 /// server) and goes on to the next missing permission by itself.
 /// Setup does not ask for permissions (user, 2026-11-15): the server sends `permAsk` when a session's
-/// tool failed for want of one (lib/permneed.js), and `ask` first says why, with Allow / Not now.
+/// tool failed for want of one (lib/permneed.ts), and `ask` first says why, with Allow / Not now.
 final class PermissionGuide: NSObject, NSWindowDelegate {
     static let shared = PermissionGuide()
 
