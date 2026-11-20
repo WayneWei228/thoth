@@ -16,6 +16,45 @@ export const IMAGE_EXT = /\.(png|jpe?g|gif|webp|heic)$/i;
 const EXTS =
   'png|jpe?g|gif|webp|heic|pdf|txt|md|csv|tsv|json|ya?ml|xml|html?|log|ipynb|py|js|ts|swift|java|go|rs|c|cpp|h|rb|sh|sql';
 export const ATTACH_EXT = new RegExp(String.raw`\.(${EXTS})$`, 'i');
+/** The type an attached file is served with (GET /api/attachment), or null when it is not an attachment
+ * type. Images and PDFs as they are; every other type (HTML, XML, code, text) as plain text, so a
+ * browser never runs it. */
+export function attachmentType(file: string): { mime: string } | null {
+  if (!ATTACH_EXT.test(file)) return null;
+  const ext = path.extname(file).slice(1).toLowerCase();
+  if (IMAGE_EXT.test(file)) return { mime: 'image/' + ext.replace('jpg', 'jpeg') };
+  if (ext === 'pdf') return { mime: 'application/pdf' };
+  return { mime: 'text/plain; charset=utf-8' };
+}
+
+/** GET /api/attachment?path=: the file to send and its headers, or the error code. Only a file in
+ * `dir` (also after links) of an attachment type. Every type but PDF gets a sandbox policy (Chrome
+ * shows no PDF under one; a PDF runs no page script). */
+export async function attachmentFile(
+  requested: string,
+  dir: string,
+): Promise<{ code: 403 | 404 } | { real: string; headers: Record<string, string> }> {
+  const p = path.resolve(requested);
+  const type = attachmentType(p);
+  if (!p.startsWith(dir + path.sep) || !type) return { code: 403 };
+  let real: string, realDir: string;
+  try {
+    [real, realDir] = await Promise.all([fs.promises.realpath(p), fs.promises.realpath(dir)]);
+  } catch {
+    return { code: 404 };
+  }
+  if (!real.startsWith(realDir + path.sep)) return { code: 403 };
+  const safe = type.mime === 'application/pdf' ? {} : { 'Content-Security-Policy': "sandbox; default-src 'none'" };
+  return {
+    real,
+    headers: {
+      'Content-Type': type.mime,
+      'Cache-Control': 'max-age=3600',
+      'X-Content-Type-Options': 'nosniff',
+      ...safe,
+    },
+  };
+}
 export const MAX_BYTES = 20 * 1024 * 1024;
 // the JSON body of an upload: base64 of MAX_BYTES (4/3) plus the name and a margin. An encoder that
 // writes "/" as "\/" (Apple's JSONSerialization without .withoutEscapingSlashes, as older remote client

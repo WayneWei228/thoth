@@ -26,6 +26,7 @@ import * as Devices from './lib/devices.ts';
 import * as Joins from './lib/join_requests.ts';
 import { BrainEvents } from './lib/brain_events.ts';
 import { readRecords, outsideHolders, paneSessions, paneRunning, isBlocked, migrationPlan } from './lib/elsewhere.ts';
+import { newestSid, sameConversation } from './lib/continued.ts';
 import * as Firewall from './lib/firewall.ts';
 import { highlight } from './lib/highlight.ts';
 import * as Fetch from './lib/fetch_result.ts';
@@ -44,6 +45,7 @@ import * as RemoteNew from './lib/remote_new.ts';
 import { createRemoteListeners } from './lib/remote_listen.ts';
 import * as Restore from './lib/restore.ts';
 import * as SelfUpdate from './lib/self_update.ts';
+import { isWsl } from './lib/wsl.ts';
 import * as router from './lib/router.ts';
 import { parseScreen, ANSI, inputBoxText, draftText, type MenuOption } from './lib/screen.ts';
 import * as Asks from './lib/asks.ts';
@@ -54,6 +56,7 @@ import * as SetupPrompt from './lib/setup_prompt.ts';
 import * as Thumb from './lib/thumb.ts';
 import * as Tidy from './lib/tidy.ts';
 import * as Trust from './lib/trust.ts';
+import * as WslHost from './lib/wsl_host.ts';
 
 const ROOT = import.meta.dirname;
 const env = (name: string): string => process.env[name] ?? '';
@@ -774,8 +777,9 @@ interface TInfo {
   mtime: number;
   lastMsg: number;
   busy?: boolean;
-  /** the question the reply that ended the last turn asks the owner, or '' (lib/asks.ts) */
-  asks?: string;
+  /** the reply that ended the last turn, newlines kept (lib/asks.ts finalText); '' when the newest
+   * message is not an assistant text. What it asks is decided by asksJudge in waitsOf. */
+  final?: string;
 }
 
 async function poll(): Promise<void> {
@@ -862,10 +866,13 @@ async function poll(): Promise<void> {
         }
       }
     } else {
+      // a conversation Claude Code continued in a new transcript (moved to the background): the
+      // pane's process record keeps the old id, the conversation goes on in the new file (lib/continued.ts)
       const exact = running ? (paneSid.get(panePid) ?? '') : '';
-      if (exact && exact !== sid) {
-        await tmux(['set-option', '-w', '-t', id, '@sid', exact]);
-        sid = exact;
+      const newest = newestSid(path.join(PROJECTS, slugOf(folder)), exact || sid);
+      if (newest && newest !== sid) {
+        await tmux(['set-option', '-w', '-t', id, '@sid', newest]);
+        sid = newest;
       }
     }
     // The state from hooks (Claude Code and Codex), with the screen where hooks are silent (lib/hookstate.ts)
@@ -888,7 +895,9 @@ async function poll(): Promise<void> {
         saveHookRecs();
         rec = null;
       }
-      if (rec && rec.sid && isUuid(sid) && rec.sid !== sid) rec = null; // another session in this window
+      // another session in this window (a record of the id this conversation was continued from still counts)
+      if (rec && has(rec.sid) && isUuid(sid) && !sameConversation(path.join(PROJECTS, slugOf(folder)), rec.sid, sid))
+        rec = null;
       hooked = !!rec && rec.state !== 'stopped';
       state = HookState.combine({
         running,
@@ -965,13 +974,23 @@ async function poll(): Promise<void> {
   void flushPending();
 }
 
+/** Does the reply that ended a turn ask the owner something (lib/asks.ts)? A question mark answers at
+ * once; else haiku decides in the background, once per reply (answers kept in asks.json), and the
+ * session shows the question on the poll after the answer. Only idle sessions ask (waitsOf). */
+const asksJudge = new Asks.AsksJudge(Asks.claudeAsks(path.join(INST.home, 'router')), {
+  file: path.join(INST.home, 'asks.json'),
+  onAnswer: () => {
+    pollSoon(0);
+  },
+});
+
 /** What an idle Claude session waits for from the owner (Session.waits), or null (lib/asks.ts). The
  * capture with escape codes runs only when Asks.needsCapture says so. */
 async function waitsOf(id: string, screen: string, tinfo: TInfo | null): Promise<Waits | null> {
   const now = Date.now();
   if (typingInto.has(id)) {
     boxSeen.delete(id); // a long message can take longer than SETTLE_MS to type and send
-    return Asks.waitsFrom(undefined, tinfo?.asks ?? '', now);
+    return Asks.waitsFrom(undefined, asksJudge.of(tinfo?.final ?? ''), now);
   }
   const box = inputBoxText(screen);
   const old = boxSeen.get(id);
@@ -980,7 +999,7 @@ async function waitsOf(id: string, screen: string, tinfo: TInfo | null): Promise
     : null;
   const seen = Asks.seeBox(old, box, draft, now);
   boxSeen.set(id, seen);
-  return Asks.waitsFrom(seen, tinfo?.asks ?? '', now);
+  return Asks.waitsFrom(seen, asksJudge.of(tinfo?.final ?? ''), now);
 }
 
 // A fresh session gets its transcript id once Claude writes the file.
@@ -1513,11 +1532,15 @@ setTimeout(() => {
 // and the claude/codex checks run less often. After a 404 (an older brain) the same brain is asked
 // again in 10 minutes; after 401/403/429 (a refused token) in an hour (Heartbeat.waitAfter).
 // CC_PANEL_NO_BRAIN or CC_PANEL_NO_HEARTBEAT turn it off.
+/** This Linux runs inside WSL on a Windows PC (read once: it does not change while the server runs). */
+const IS_WSL = isWsl();
 const beat = {
   projects: { at: 0, key: '\u0000', list: [] as Heartbeat.Project[] },
   tools: { at: 0, claude: false, codex: false },
   pause: null as Heartbeat.Pause | null,
   lastLog: '',
+  /** WSL: the last Windows power state and when it was read (WslHost.AC_EVERY_MS) */
+  winAc: { at: 0, onAc: null as boolean | null },
 };
 function heartbeatTarget(): Heartbeat.Target | null {
   const id = cloudIdentity();
@@ -1535,13 +1558,25 @@ function heartbeatTarget(): Heartbeat.Target | null {
     test: Boolean(INST.test),
   });
 }
-function pmsetBatt(): Promise<string> {
-  if (process.platform !== 'darwin') return Promise.resolve('');
+/** The output of a power command, null when it fails or runs too long. */
+function runPower(cmd: string, args: string[], timeout: number): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile('pmset', ['-g', 'batt'], { timeout: 5000 }, (_e, out) => {
-      resolve(out || '');
+    execFile(cmd, args, { timeout }, (e, out) => {
+      resolve(e ? null : out);
     });
   });
+}
+/** On AC power? macOS: pmset; WSL: Windows' Win32_Battery through powershell.exe (lib/wsl_host.ts;
+ * no battery = a desktop PC = AC); null when it cannot be told. Every helper the busy rule picks
+ * must say true (lib/device_pick.ts). */
+async function onAcPower(): Promise<boolean | null> {
+  if (process.platform === 'darwin') return Heartbeat.onAcPower(await runPower('pmset', ['-g', 'batt'], 5000));
+  if (!IS_WSL) return null;
+  const now = Date.now();
+  if (now - beat.winAc.at < WslHost.AC_EVERY_MS) return beat.winAc.onAc;
+  const [cmd, args] = WslHost.BATTERY_CMD;
+  beat.winAc = { at: now, onAc: WslHost.onAcFromBattery(await runPower(cmd, args, WslHost.TIMEOUT_MS)) };
+  return beat.winAc.onAc;
 }
 /** Is the codex CLI there? Async (never blocks the server, unlike Codex.availability). */
 function codexInstalled(): Promise<boolean> {
@@ -1575,7 +1610,7 @@ async function sendHeartbeat(now: number = Date.now()): Promise<void> {
   }
   const hb = Heartbeat.build({
     role: setupState()['role'],
-    onAc: Heartbeat.onAcPower(await pmsetBatt()),
+    onAc: await onAcPower(),
     load: os.loadavg()[0] ?? 0,
     cpus: os.cpus().length,
     sessionStates: live.map((x) => x.state),
@@ -1584,6 +1619,7 @@ async function sendHeartbeat(now: number = Date.now()): Promise<void> {
     codex: beat.tools.codex,
     version: THOTH_VERSION,
     commit: OWN_BUILD.commit,
+    os: Setup.thisSystem(IS_WSL),
   });
   const target: BrainTarget = { cloud: true, url: new URL(t.url), token: t.token };
   try {
@@ -2199,7 +2235,7 @@ function transcriptInfo(folder: string, sid: string): TInfo | null {
     if (!reply && j.type === 'assistant') reply = text.slice(0, 300);
     if (!prompt && j.type === 'user' && !/^<|^\[Request interrupted/.test(text)) prompt = text.slice(0, 200);
   }
-  const v = { reply, prompt, title, mtime: st.mtimeMs, lastMsg, asks: Asks.questionOf(Asks.finalText(lines)) };
+  const v = { reply, prompt, title, mtime: st.mtimeMs, lastMsg, final: Asks.finalText(lines) };
   tailCache.set(file, { mtime: st.mtimeMs, v });
   return v;
 }
@@ -4082,22 +4118,21 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
   if (url.pathname === '/api/attachment') {
-    // only files in the attachments folder are served
-    const p = path.resolve(url.searchParams.get('path') ?? '');
-    if (!p.startsWith(ATTACH_DIR + path.sep) || !IMAGE_EXT.test(p)) {
-      sendEmpty(res, 403);
-      return;
-    }
-    fs.readFile(p, (err, data) => {
-      if (err) {
-        sendEmpty(res, 404);
+    // only files in the attachments folder (also after links), of an attachment type; a type that
+    // could run code goes out as plain text (lib/attachments.ts attachmentFile)
+    void Attachments.attachmentFile(url.searchParams.get('path') ?? '', ATTACH_DIR).then((r) => {
+      if ('code' in r) {
+        sendEmpty(res, r.code);
         return;
       }
-      res.writeHead(200, {
-        'Content-Type': 'image/' + path.extname(p).slice(1).replace('jpg', 'jpeg'),
-        'Cache-Control': 'max-age=3600',
+      fs.readFile(r.real, (err, data) => {
+        if (err) {
+          sendEmpty(res, 404);
+          return;
+        }
+        res.writeHead(200, r.headers);
+        res.end(data);
       });
-      res.end(data);
     });
     return;
   }
@@ -5088,12 +5123,14 @@ async function handlePeerUpdate(req: http.IncomingMessage, res: http.ServerRespo
       updateId: r.updateId,
       commit: r.commit,
       time: r.time,
-      label: SelfUpdate.launchdLabel(process.env),
+      label: SelfUpdate.serviceLabel(process.env),
       node: process.execPath,
       serverPid: process.pid,
     });
     taken = ''; // the script has it now: it frees the slot by writing failed (or the restart does)
-    console.log(`update ${r.updateId}: installing ${r.commit.slice(0, 12)} from the main panel`);
+    console.log(
+      `update ${r.updateId}: installing ${r.commit.slice(0, 12)} from the main panel${isWsl() ? ' (WSL)' : ''}`,
+    );
     broadcast();
     sendJson(res, 200, { updateId: r.updateId, state: 'installing' });
   } catch (e) {

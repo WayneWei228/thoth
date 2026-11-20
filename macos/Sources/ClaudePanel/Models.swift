@@ -244,6 +244,8 @@ struct PeerInfo: Codable, Hashable {
     }
     /// "Update <device>" is offered: it is older, or its last update failed (not while one runs).
     var canUpdate: Bool { update == "needed" || update == "failed" }
+    /// The header shows the Update / Retry button: it can be updated and it answers now.
+    var showsUpdateButton: Bool { canUpdate && online }
 }
 struct PeerList: Codable {
     let peers: [PeerInfo]

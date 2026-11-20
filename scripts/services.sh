@@ -412,6 +412,26 @@ doctor_pass() {
       bad "systemd user session is not available" "The unit files exist but this shell cannot reach systemd --user." "Log in again (a full login, not su), or run: export XDG_RUNTIME_DIR=/run/user/$UID_N"
     fi
   fi
+  # always-on on a Windows helper (WSL): Windows power settings, the task ThothWSL, .wslconfig
+  # (CC_SERVICES_WSL=1: pretend WSL, for the tests). Rows: kind<TAB>title<TAB>fix<TAB>cause.
+  if [ "$OS" != Darwin ] && [ -n "$NODE_BIN" ] && { [ "${CC_SERVICES_WSL:-}" = 1 ] || grep -qi microsoft /proc/version 2>/dev/null; }; then
+    local kind title afix cause rows rc errf
+    errf=$(mktemp)
+    rows=$("$NODE_BIN" "$APP_DIR/scripts/always-on.ts" --doctor 2>"$errf"); rc=$?
+    if [ "$rc" != 0 ] || [ -z "$rows" ]; then
+      # the error line of a Node crash (not the stack lines after it)
+      bad "the always-on check could not run (exit $rc)" "$({ grep -m1 -E '^[A-Za-z]*Error' "$errf" || tail -n 1 "$errf"; } | cut -c1-300)" "thoth always-on --status   (shows the whole error)"
+    else
+      while IFS=$'\t' read -r kind title afix cause; do
+        case "$kind" in
+          ok) ok "$title" ;;
+          bad) bad "$title" "${cause:-Windows can sleep or stop WSL, and then this helper is offline.}" "$afix" ;;
+          warn) warn "$title" "$afix" ;;
+        esac
+      done <<<"$rows"
+    fi
+    rm -f "$errf"
+  fi
   # disk
   local use free
   use=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}'); free=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print int($4/1024)}')

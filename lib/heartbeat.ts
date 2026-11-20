@@ -61,6 +61,8 @@ export interface Heartbeat {
   thoth_version: string;
   /** the Thoth commit (40 hex), '' when not known (lib/self_update.ts readBuild) */
   thoth_commit: string;
+  /** macos, linux, windows, or windows-wsl (lib/wsl_host.ts systemOs) */
+  os: string;
   device?: string;
 }
 
@@ -75,6 +77,7 @@ export interface HeartbeatInput {
   codex: boolean;
   version: string;
   commit: string;
+  os: string;
 }
 
 export function build(i: HeartbeatInput): Heartbeat {
@@ -90,6 +93,7 @@ export function build(i: HeartbeatInput): Heartbeat {
     codex: i.codex,
     thoth_version: i.version,
     thoth_commit: /^[\da-f]{40}$/.test(i.commit) ? i.commit : '',
+    os: i.os,
   };
 }
 

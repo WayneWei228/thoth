@@ -3,14 +3,17 @@
 # Started detached by the server (lib/self_update.ts startInstall) after it checked who sent the
 # bundle, its SHA-256 and its file list. Never run by hand.
 #
-#   self-update.sh <root> <bundle.tgz> <status file> <update id> <commit> <commit time> <launchd label> <node> <server pid>
+#   self-update.sh <root> <bundle.tgz> <status file> <update id> <commit> <commit time> <service> <node> <server pid>
 #
 # 1. unpack into <root>.thoth-new (next to the copy), write BUILD;
 # 2. move node_modules (and the Mac app's build cache) over, so npm install takes seconds;
 # 3. swap: <root> -> <root>.thoth-old, the new copy -> <root>; npm install; on a failure the old copy
 #    goes back and the server keeps running unchanged;
-# 4. restart: the launchd job that runs the server (and its brain job, when there is one), or else
-#    stop the server and start it again with the same environment.
+# 4. restart: the launchd job that runs the server (and its brain job, when there is one); on Linux
+#    (WSL too) the systemd user unit of scripts/services.sh (<service> ends in .service; and its brain
+#    unit); or else stop the server and start it again with the same environment.
+#    tmux (the Claude sessions) is not stopped: launchd's job and the unit's KillMode=process stop only
+#    the server process.
 # The status file (<state>/update.json) says how far it got; the new server marks it done when it
 # runs the new commit (lib/self_update.ts settleAfterStart). <root>.thoth-old stays until the next update.
 set -u
@@ -26,7 +29,7 @@ status() {  # state, error
 }
 fail() { log "failed: $1"; status failed "$1"; rm -rf "$NEW"; rm -f "$BUNDLE"; exit 1; }
 
-log "from $(cat "$ROOT/BUILD" 2>/dev/null | cut -c1-12) to ${COMMIT:0:12} in $ROOT (launchd job: ${LABEL:-none})"
+log "from $(cat "$ROOT/BUILD" 2>/dev/null | cut -c1-12) to ${COMMIT:0:12} in $ROOT (service: ${LABEL:-none})"
 status installing
 [ -d "$ROOT/.git" ] && fail "this copy is a git checkout"
 # one run at a time (the server also refuses a second request while one runs). The lock holds the
@@ -51,7 +54,9 @@ printf '%s %s\n' "$COMMIT" "$TIME" >"$NEW/BUILD" || fail "cannot write BUILD"
 
 # the packages and the build cache are copied over (APFS clones: fast, no extra space); the old copy
 # keeps its own, so npm in the new copy never changes the packages of the copy that runs
-copy() { cp -Rc "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -R "$1" "$2"; }; }
+# (Linux: --reflink=auto, a clone where the file system has them; GNU cp -c means something else)
+if [ "$(uname -s)" = Darwin ]; then CLONE=(-Rc); else CLONE=(-R --reflink=auto); fi
+copy() { cp "${CLONE[@]}" "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -R "$1" "$2"; }; }
 [ -d "$ROOT/node_modules" ] && { copy "$ROOT/node_modules" "$NEW/node_modules" || fail "cannot copy node_modules"; }
 [ -d "$ROOT/macos/.build" ] && mkdir -p "$NEW/macos" && copy "$ROOT/macos/.build" "$NEW/macos/.build"
 back() {  # the old copy back in place, unchanged; the running server never noticed
@@ -71,7 +76,18 @@ if ! (cd "$ROOT" && "$NPM" install --no-audit --no-fund --loglevel=error </dev/n
 fi
 
 status restarting
-if [ -n "$LABEL" ]; then
+if [[ "$LABEL" == *.service ]]; then
+  # systemd user units (Linux, WSL): systemctl needs the user manager's runtime folder and bus
+  [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ] && export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ] && export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  BRAIN="${LABEL/claude-panel-server/claude-panel-brain}"
+  if systemctl --user is-active --quiet "$BRAIN"; then
+    log "restarting $BRAIN"
+    systemctl --user restart "$BRAIN" || log "the brain unit did not restart"
+  fi
+  log "restarting $LABEL"
+  systemctl --user restart "$LABEL" || fail "systemctl could not restart $LABEL: the new copy is installed and starts at the next restart of the unit"
+elif [ -n "$LABEL" ]; then
   DOM="gui/$(id -u)"
   BRAIN="${LABEL/com.claudepanel.server/com.claudepanel.brain}"
   if launchctl print "$DOM/$BRAIN" >/dev/null 2>&1; then

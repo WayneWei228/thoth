@@ -1,7 +1,7 @@
 // Device choice for a NEW session (multi-device plan, PR 6). The router (lib/router.ts) only extracts
 // a device the user named ("用家里的电脑", "on the mini") into the decision's "device"; the rules
 // here pick the computer, so the choice is testable and predictable:
-//   1. the user named a device -> that one ("this mac" also for a request about this computer itself);
+//   1. the user named a device -> that one (this Mac too, by its name in the Devices list);
 //   2. the project is on only one device (heartbeat projects, matched by git remote) -> that one;
 //   3. this Mac, unless it is busy; then the helper that is online, on AC power, has the agent,
 //      and runs the fewest sessions.
@@ -173,14 +173,11 @@ export function pickDevice(i: PickInput): Pick {
   const notes: string[] = [];
   // 1. the user named a device
   if (i.named.trim()) {
-    const thisMac = ['this mac', 'here', 'local', '本机', '这台', '这台电脑', '这台mac'];
-    const name = findNamed(i.named, [...(i.local ? [i.local] : []), ...remotes.map((d) => d.name)]);
-    // a word for "here": the user said it, or the router's "this mac" for a request about this computer
-    // itself (its CPU, disk, apps, local files), which the user did not name: say neither "asked" nor "busy"
-    if (thisMac.includes(i.named.trim().toLowerCase()))
-      return { device: '', rule: 'named', note: 'This request is for this Mac.' };
-    if (name !== null && name.toLowerCase() === here)
-      return { device: '', rule: 'named', note: 'You asked for this Mac.' };
+    // the router answers a name from the Devices list (promptDevices): this Mac is its device name, or
+    // THIS_MAC when it has none. No list of words: the model decides, the code compares the exact name.
+    const self = i.local || THIS_MAC;
+    const name = findNamed(i.named, [self, ...remotes.map((d) => d.name)]);
+    if (name === self) return { device: '', rule: 'named', note: 'You asked for this Mac.' };
     const d = name === null ? undefined : remotes.find((x) => x.name === name);
     if (d) {
       const why = unfit(d, i.agent);
@@ -224,6 +221,9 @@ export function pickDevice(i: PickInput): Pick {
   return { device: '', rule: 'busy', note: [...notes, `This Mac is busy, but ${none}.`].join(' ') };
 }
 
+/** This Mac's name in the router's Devices list when it has no device name. */
+export const THIS_MAC = 'this Mac';
+
 // A project name shown to the router: a plain folder name, nothing that reads as a sentence.
 const SAFE_PROJECT = /^[\p{L}\p{N}._+-]{1,80}$/u;
 const projectName = (p: DeviceProject): string => {
@@ -239,7 +239,7 @@ export function promptDevices(local: string, devices: readonly Device[]): object
   const remotes = devices.filter((d) => d.name.toLowerCase() !== here && d.helper);
   if (!remotes.length) return [];
   return [
-    { name: local || 'this Mac', this_mac: true },
+    { name: local || THIS_MAC, this_mac: true },
     ...remotes.map((d) => ({
       name: d.name,
       online: d.online,

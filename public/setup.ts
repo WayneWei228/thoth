@@ -149,13 +149,24 @@ const errMsg = (x: unknown): string => (x instanceof Error ? x.message : String(
 
 const NAMES = ['Your devices', 'Connect them', 'Your brain', 'Keep it on', 'Move sessions in'];
 const CLOUD = ':cloud'; // S.brain for a cloud brain (lib/setup.ts)
-const OS: Record<string, string> = { macos: 'macOS', linux: 'Linux', windows: 'Windows' };
+// windows-wsl: Linux inside WSL on a Windows PC (lib/wsl_host.ts; same label as lib/join_requests.ts)
+const OS: Record<string, string> = {
+  macos: 'macOS',
+  linux: 'Linux',
+  windows: 'Windows',
+  'windows-wsl': 'Windows (WSL)',
+};
+/** The systems a person can choose in step 1 (lib/setup.ts OSES). windows-wsl is only a label: a
+ * WSL computer reports it itself (heartbeat, join request). */
+const OS_CHOICES = ['macos', 'linux', 'windows'];
 const SLEEP_ADVICE: Record<string, string> = {
   macos:
     'On the Mac: System Settings, Energy (or Battery, Options). Turn on "Prevent automatic sleeping when the display is off", and keep it plugged in.',
   linux:
     'On the Linux computer: turn off automatic suspend in Settings, Power. Or run: sudo systemctl mask sleep.target suspend.target',
   windows: 'On the Windows PC: Settings, System, Power. Set "When plugged in, put my device to sleep after" to Never.',
+  'windows-wsl':
+    'On the Windows PC: Settings, System, Power. Set "When plugged in, put my device to sleep after" to Never.',
 };
 let state: Setup | null = null; // GET /api/setup
 let O: Outside | null = null; // GET /api/setupOutside (step 5)
@@ -236,6 +247,7 @@ const I = {
 const GLYPH: Record<string, string> = {
   macos: '<rect x="4" y="5" width="16" height="11" rx="1.6"/><path d="M2 19h20"/>',
   windows: '<rect x="3" y="4" width="18" height="12" rx="1.6"/><path d="M9 20h6M12 16v4"/>',
+  'windows-wsl': '<rect x="3" y="4" width="18" height="12" rx="1.6"/><path d="M9 20h6M12 16v4"/>',
   linux: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h3"/>',
   session: '<path d="M4 6l4 4-4 4"/><path d="M11 16h9"/>',
   cloud: '<path d="M7 18h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.4 9.2 4.5 4.5 0 0 0 7 18z"/>',
@@ -1008,7 +1020,10 @@ function brainMap(hub: Device): string {
 function devRow(d: { name: string; os: string }): string {
   const id = Math.random().toString(36).slice(2, 8);
   return `<div class="box devrow dev"><input type="text" class="name" placeholder="Name, for example work-pc" value="${esc(d.name)}" aria-label="Computer name" autocomplete="off" spellcheck="false">
-    <span class="seg" role="radiogroup" aria-label="Operating system">${Object.entries(OS)
+    <span class="seg" role="radiogroup" aria-label="Operating system">${OS_CHOICES.map((k): [string, string] => [
+      k,
+      OS[k] ?? k,
+    ])
       .map(
         ([k, v]) =>
           `<label><input type="radio" name="os-${id}" value="${k}" ${d.os === k ? 'checked' : ''}><span>${v}</span></label>`,

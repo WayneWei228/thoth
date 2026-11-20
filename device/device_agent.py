@@ -80,7 +80,22 @@ def post(url, body, token=None, timeout=120):
 
 def this_os():
     s = platform.system()
+    if s == "Linux" and is_wsl():
+        return "windows-wsl"  # Linux inside WSL on a Windows PC (lib/wsl.ts)
     return "macos" if s == "Darwin" else "windows" if s == "Windows" else "linux"
+
+
+def is_wsl(release=None, proc_version=None):
+    """This Linux runs inside WSL: the kernel release or /proc/version names Microsoft."""
+    if "microsoft" in (platform.release() if release is None else release).lower():
+        return True
+    if proc_version is None:
+        try:
+            with open("/proc/version", encoding="utf-8") as f:
+                proc_version = f.read()
+        except OSError:
+            proc_version = ""
+    return "microsoft" in proc_version.lower()
 
 
 def save(conf):

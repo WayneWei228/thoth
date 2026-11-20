@@ -13,6 +13,8 @@ import path from 'node:path';
 import type { Device } from './devices.ts';
 import * as Firewall from './firewall.ts';
 import { ne, truthy } from './truthy.ts';
+import { isWsl } from './wsl.ts';
+import * as WslHost from './wsl_host.ts';
 
 const NAME = /^[a-z\d][a-z\d-]{0,30}$/;
 export const CLOUD = ':cloud'; // s.brain for a cloud brain (never a device name: NAME has no ':')
@@ -29,9 +31,15 @@ export interface SetupState {
   [key: string]: unknown;
 }
 
+/** The OS family for packages and the setup page's device list. WSL is 'linux' here (apt, tmux);
+ * thisSystem() says that it is WSL. */
 export function thisOs(): 'macos' | 'windows' | 'linux' {
   if (process.platform === 'darwin') return 'macos';
   return process.platform === 'win32' ? 'windows' : 'linux';
+}
+/** macos, windows, linux, or windows-wsl (Linux inside WSL on a Windows PC). */
+export function thisSystem(wsl: boolean = isWsl()): string {
+  return WslHost.systemOs(process.platform, wsl);
 }
 export function hostName(): string {
   return (
@@ -403,9 +411,10 @@ export interface KeepOn {
   steps?: string[];
 }
 
-/** Can this machine stay on? macOS: pmset sleep; Linux: systemd sleep targets. Plain words. */
-export function keepOnCheck(env: NodeJS.ProcessEnv = process.env): KeepOn {
-  const o = thisOs();
+/** Can this machine stay on? macOS: pmset sleep; Linux: systemd sleep targets; WSL and Windows:
+ * the Windows power settings. Plain words. */
+export function keepOnCheck(env: NodeJS.ProcessEnv = process.env, wsl: boolean = isWsl()): KeepOn {
+  const o = wsl ? 'windows' : thisOs();
   if (ne(env['CC_SETUP_FAKE_SLEEP']))
     return { ok: false, detail: 'This computer goes to sleep after 10 minutes.', fix: 'test fault' };
   if (o === 'macos') {
@@ -473,7 +482,7 @@ export function diagnostics({ home, logFile, env = process.env, brainUp = null }
   const claude = ne(which('claude', env)) ? (run('claude', ['--version']) ?? '') || 'found' : 'missing';
   const lines = [
     `Thoth diagnostics  ${new Date().toISOString()}`,
-    `os: ${os.type()} ${os.release()} ${os.arch()}   node: ${process.versions.node}`,
+    `os: ${os.type()} ${os.release()} ${os.arch()}${isWsl() ? ' (WSL on Windows)' : ''}   node: ${process.versions.node}`,
     `tmux: ${(run('tmux', ['-V']) ?? '') || 'missing'}   python3: ${(run('python3', ['--version']) ?? '') || 'missing'}   claude: ${claude}`,
     '',
   ];

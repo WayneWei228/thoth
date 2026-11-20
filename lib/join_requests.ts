@@ -23,7 +23,12 @@ export interface JoinRequest {
 /** Where the owner approves: printed by `thoth setup` while it waits (exit 6). */
 export const WHERE = 'In Thoth on your main Mac: the join request at the top of the sidebar, or File > Set Up Devices…';
 
-const OS: Record<string, string> = { macos: 'macOS', windows: 'Windows', linux: 'Linux' };
+const OS: Record<string, string> = {
+  macos: 'macOS',
+  windows: 'Windows',
+  'windows-wsl': 'Windows (WSL)',
+  linux: 'Linux',
+};
 export const osLabel = (os: string): string => OS[os.toLowerCase()] ?? (os || 'Unknown system');
 
 export const title = (name: string): string => `${name} wants to join`;

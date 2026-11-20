@@ -480,7 +480,8 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         switch rows[row] {
-        case .header, .device: return 26
+        case .header: return 26
+        case .device(_, _, let peer): return peer?.showsUpdateButton == true ? 32 : 26   // room for the Update button
         case .nav: return 30
         case .join: return 84
         case .session(let s): return (s.title?.isEmpty == false || (selecting && hints[s.id] != nil)) ? 44 : 30
@@ -552,20 +553,64 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             return v
         case .device(let d, let off, let peer):
             // a helper computer: its name; grey with "offline" when it does not answer; "update needed"
-            // (orange) when it runs an older Thoth, "updating…", or "update failed" (red, the error as tooltip)
+            // (orange) when it runs an older Thoth, "updating…", or "update failed" (red, the error as tooltip).
+            // An older helper that is online gets an "Update" button on the right ("Retry" after a failure);
+            // during an update a spinner stands there instead.
             let img = NSImageView(image: Theme.icon("desktopcomputer", d)!)
             img.contentTintColor = off ? .tertiaryLabelColor : .secondaryLabelColor
             img.translatesAutoresizingMaskIntoConstraints = false
             let note = peer?.note ?? (off ? "offline" : nil)
             let color: NSColor = peer?.update == "failed" ? Theme.red : peer?.update == "needed" ? .systemOrange : .tertiaryLabelColor
             let l = label(note.map { "\(d) · \($0)" } ?? d, size: 11, weight: .semibold, color: color)
-            if let peer, peer.canUpdate { l.toolTip = (peer.error.flatMap { $0.isEmpty ? nil : $0 + "\n" } ?? "") + "Right-click: Update \(d)" }
+            l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            if let peer, peer.canUpdate {
+                let why = peer.error.flatMap { $0.isEmpty ? nil : $0 + "\n" } ?? ""
+                l.toolTip = why + (peer.online ? "This computer runs an older Thoth than this Mac." : "Offline: update it when it is back.")
+            }
             let v = NSView(); v.addSubview(img); v.addSubview(l)
             NSLayoutConstraint.activate([
-                img.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8), img.centerYAnchor.constraint(equalTo: l.centerYAnchor),
+                img.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8), img.centerYAnchor.constraint(equalTo: v.centerYAnchor),
                 img.widthAnchor.constraint(equalToConstant: 13), img.heightAnchor.constraint(equalToConstant: 13),
-                l.leadingAnchor.constraint(equalTo: img.trailingAnchor, constant: 5), l.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -4),
+                l.leadingAnchor.constraint(equalTo: img.trailingAnchor, constant: 5), l.centerYAnchor.constraint(equalTo: v.centerYAnchor),
             ])
+            let device = d
+            var right: NSView?
+            if let peer, peer.showsUpdateButton {
+                let b = NSButton(title: peer.update == "failed" ? "Retry" : "Update", target: self, action: #selector(updateDeviceButton(_:)))
+                // a filled orange (red: Retry) button with white text: a grey bezel was easy to miss
+                b.isBordered = false
+                b.wantsLayer = true
+                b.layer?.backgroundColor = (peer.update == "failed" ? Theme.red : NSColor.systemOrange).cgColor
+                b.layer?.cornerRadius = 5
+                b.attributedTitle = NSAttributedString(string: b.title, attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 11, weight: .semibold)])
+                b.image = Theme.icon("arrow.down.circle.fill", "Update")
+                b.contentTintColor = .white
+                b.imagePosition = .imageLeading
+                b.imageHugsTitle = true
+                b.widthAnchor.constraint(equalToConstant: b.intrinsicContentSize.width + 16).isActive = true
+                b.heightAnchor.constraint(equalToConstant: 20).isActive = true
+                b.identifier = NSUserInterfaceItemIdentifier(d)
+                b.toolTip = "Send this Mac's Thoth to \(d): it installs it and restarts (about 20 seconds)"
+                b.setAccessibilityIdentifier("sidebar.device.\(device).updateButton")
+                right = b
+            } else if peer?.update == "updating" {
+                let sp = NSProgressIndicator()
+                sp.style = .spinning
+                sp.controlSize = .small
+                sp.startAnimation(nil)
+                sp.setAccessibilityIdentifier("sidebar.device.\(device).updating")
+                right = sp
+            }
+            if let right {
+                right.translatesAutoresizingMaskIntoConstraints = false
+                v.addSubview(right)
+                NSLayoutConstraint.activate([
+                    right.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8), right.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+                    l.trailingAnchor.constraint(lessThanOrEqualTo: right.leadingAnchor, constant: -6),
+                ])
+            } else {
+                l.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -8).isActive = true
+            }
             return v
         case .join(let j):
             return joinCell(j)
@@ -733,7 +778,7 @@ extension SidebarViewController: NSMenuDelegate {
         let row = table.clickedRow
         // a helper computer's header: "Update <device>" when it runs an older Thoth (lib/self_update.ts)
         if row >= 0, case .device(let device, _, let peer) = rows[row] {
-            let item = NSMenuItem(title: "Update \(device)", action: peer?.canUpdate == true ? #selector(updateDevice(_:)) : nil, keyEquivalent: "")
+            let item = NSMenuItem(title: "Update \(device)", action: peer?.showsUpdateButton == true ? #selector(updateDevice(_:)) : nil, keyEquivalent: "")
             item.target = self
             item.representedObject = device
             item.setAccessibilityIdentifier("sidebar.device.\(device).update")
@@ -752,6 +797,15 @@ extension SidebarViewController {
     /// "updating…" until the helper is back with the new build (or "update failed").
     @objc func updateDevice(_ sender: NSMenuItem) {
         guard let d = sender.representedObject as? String else { return }
+        Backend.shared.post("updateHelper", ["device": d, "updateId": SessionMenu.newFetchId()])
+    }
+
+    /// The "Update" / "Retry" button on the helper's header: the same as the menu item.
+    @objc func updateDeviceButton(_ sender: NSButton) {
+        guard let d = sender.identifier?.rawValue else { return }
+        sender.isEnabled = false   // one click (dimmed: its colors are on the layer);
+        sender.alphaValue = 0.5
+        // the header shows "updating…" at the next state message
         Backend.shared.post("updateHelper", ["device": d, "updateId": SessionMenu.newFetchId()])
     }
 }

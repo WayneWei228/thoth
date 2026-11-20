@@ -12,6 +12,39 @@ import {
   stateClass,
 } from './pages.js';
 import type { FetchInfo, Page } from './pages.js';
+import { joinRequests } from './joins.js';
+import type { JoinRequest } from './joins.js';
+import { deviceGroups, deviceHeader, newUpdateId, showsUpdateButton } from './helper_update.js';
+import type { PeerInfo } from './helper_update.js';
+import { chipText } from './device_status.js';
+import {
+  detailView,
+  groupKey,
+  helperOf,
+  isOffline,
+  computerOptions,
+  helperHistoryText,
+  isPending,
+  isRemote,
+  mayNotify,
+  newBody,
+  pendingMenuLabel,
+  pendingNotice,
+  preparedSession,
+  needsYou,
+  offlineNotice,
+  placeText,
+  rowTip,
+  sectionPlace,
+} from './helpers.js';
+import { makeCommandMenu } from './command_menu.js';
+import { retryTarget } from './commands.js';
+import { SelectMode, asCheckRow, headerButton, mountBar, onRowsKey, rowClick } from './select.js';
+import type { SelectHooks } from './select.js';
+import { beforeFirstPoll, escapeStops, mayAskNotices, noticeFor, showNotice } from './fixes.js';
+import type { Notice } from './fixes.js';
+import { tidyButton } from './tidy.js';
+import type { TidyHooks } from './tidy.js';
 
 interface Choice {
   n: number;
@@ -34,6 +67,7 @@ interface Session {
   running: boolean;
   activity?: number;
   offline?: boolean;
+  preparedAs?: string; // a session started on a helper: the id of the preparing row it was
   fetch?: FetchInfo; // the newest "Fetch result" of a helper session (lib/fetch_result.ts)
   waits?: { kind: string; text: string }; // an idle session that waits for the owner (server.ts)
 }
@@ -61,16 +95,7 @@ interface StateMessage {
   platform?: string;
   joins?: JoinRequest[];
   join?: JoinRequest;
-}
-/** A computer waiting for the owner's Approve on the cloud brain (lib/join_requests.ts). */
-interface JoinRequest {
-  id: string;
-  name: string;
-  os: string;
-  host?: string;
-  title: string;
-  system: string;
-  notice?: string;
+  peers?: PeerInfo[]; // the helper computers and their update state (server.ts peersView)
 }
 interface ApiAnswer {
   error?: string;
@@ -91,13 +116,10 @@ interface HistoryEntry {
   title?: string;
   first?: string;
 }
-interface Prefs {
-  notify?: boolean;
-  sound?: boolean;
-}
 interface Request {
   text: string;
   attachments: string[];
+  retry?: () => void; // what Try Again does (a command goes to the same session again); none = the router again
 }
 type PageName = Page['name'];
 
@@ -146,24 +168,9 @@ let selected: string | null = null; // window id of the open session page (null 
 let page: Page = { name: 'home' };
 let connected = false; // the state socket is open
 const prev = new Map<string, string>(); // id -> last state (for notifications)
+const stopSent = new Set<string>(); // ids that Escape stopped in this working turn
 const orderKey = new Map<string, number>(); // id -> sort key of the Recent list (MainWindow.swift reload)
 const lastState = new Map<string, string>(); // id -> state at the last update (for orderKey)
-const prefs = loadPrefs();
-
-function loadPrefs(): Prefs {
-  try {
-    return JSON.parse(localStorage.getItem('ccp') ?? '{}') as Prefs;
-  } catch {
-    return {};
-  }
-}
-function savePrefs(): void {
-  try {
-    localStorage.setItem('ccp', JSON.stringify(prefs));
-  } catch {
-    /* private mode */
-  }
-}
 function store(k: string, v: string | null): void {
   try {
     if (v === null) localStorage.removeItem(k);
@@ -262,10 +269,11 @@ function setLook(l: string): void {
 // ---------- state socket ----------
 let stateKey: string | null = null;
 function onMessage(m: StateMessage, snapshot = false): void {
-  onJoins(m.joins ?? []);
+  joins.show(m.joins ?? []);
+  onPeers(m.peers ?? []);
   onMeta(m);
   onRoutes(m.routes ?? []);
-  onState((m.sessions ?? []).map(shown), snapshot);
+  onState((m.sessions ?? []).map(shown), snapshot, beforeFirstPoll(m));
 }
 function connectState(): void {
   const ws = new WebSocket(`${wsBase()}/ws/state`);
@@ -282,7 +290,7 @@ function connectState(): void {
     const m = JSON.parse(e.data) as StateMessage;
     if (m.type === 'state') onMessage(m);
     // a computer asks to join: once per request id (server.ts announceJoins)
-    else if (m.type === 'joinNotice' && m.join) notify(m.join.title, m.join.notice ?? m.join.system, '');
+    else if (m.type === 'joinNotice' && m.join) joins.notice(m.join);
   });
 }
 // first paint before the socket opens
@@ -342,24 +350,57 @@ function jumpIfSent(): void {
     go('session', target);
   }, 200);
 }
-async function sendRequest(text: string, attachments: string[]): Promise<void> {
+/** POST a request (`route`) or a command (`command`); the answer, or the error to show. */
+async function postRequest(
+  name: string,
+  body: Record<string, unknown>,
+  refused: string,
+): Promise<{ res: ApiAnswer; error: string }> {
   let res: ApiAnswer = {};
   let error = '';
   try {
-    const r = await post('route', { text, attachments });
+    const r = await post(name, body);
     res = (await r.json().catch(() => ({}))) as ApiAnswer;
     if (!r.ok) error = has(res.error) ? res.error : `HTTP ${String(r.status)}`;
   } catch {
     error = 'The server does not answer';
   }
+  if (!error && !has(res.routeId)) error = has(res.error) ? res.error : refused;
+  return { res, error };
+}
+async function sendRequest(text: string, attachments: string[]): Promise<void> {
+  const { res, error } = await postRequest('route', { text, attachments }, 'The server did not take the request');
   const routeId = res.routeId;
-  if (!error && !has(routeId)) error = has(res.error) ? res.error : 'The server did not take the request';
   if (error || !has(routeId)) {
     routeFailed({ text, attachments }, error);
     return;
   }
   mine.set(routeId, { text, attachments });
   toast('Finding the right session…');
+  checkMine();
+}
+/** Send a Claude Code command to the session the user chose (`target`; null = a new session in the
+ * default folder) and follow it. It does not go through the router (server.ts `command`). */
+async function sendCommand(text: string, attachments: string[], target: string | null, name: string): Promise<void> {
+  const again = (): void => {
+    void sendCommand(text, attachments, target, name);
+  };
+  const body = target === null ? { text, attachments } : { text, attachments, target };
+  const { res, error } = await postRequest('command', body, 'The server did not take the command');
+  const routeId = res.routeId;
+  if (error || !has(routeId)) {
+    routeFailed({ text, attachments, retry: again }, error);
+    return;
+  }
+  // "New session": the server made it (`id`). Try Again goes to that session while it is open, so a
+  // failed delivery does not make one more session each time.
+  const retry = (): void => {
+    const s = retryTarget(target, res.id, sessions);
+    if (s) void sendCommand(text, attachments, s.id, s.name);
+    else again();
+  };
+  mine.set(routeId, { text, attachments, retry });
+  toast(`Sending to ${name}…`);
   checkMine();
 }
 let failedReq: Request | null = null;
@@ -372,7 +413,8 @@ function routeFailed(req: Request, error: string): void {
 }
 $('#rf-retry').addEventListener('click', () => {
   closeDialog('#route-failed');
-  if (failedReq) void sendRequest(failedReq.text, failedReq.attachments);
+  if (failedReq?.retry) failedReq.retry();
+  else if (failedReq) void sendRequest(failedReq.text, failedReq.attachments);
 });
 $('#rf-edit').addEventListener('click', () => {
   closeDialog('#route-failed');
@@ -419,7 +461,7 @@ const onKeyOpen = (el: HTMLElement, fn: () => void) => (e: KeyboardEvent) => {
 };
 function renderHome(): void {
   // Needs you
-  const needs = sessions.filter((s) => s.state === 'needs');
+  const needs = sessions.filter((s) => needsYou(s)); // an offline helper cannot answer
   $('#needs-wrap').classList.toggle('hidden', needs.length === 0);
   const nb = $('#needs');
   nb.innerHTML = '';
@@ -599,9 +641,15 @@ interface ComposerParts {
   max: number;
   draft: string | null;
   onSend: (text: string, attachments: string[]) => void;
+  onKey?: (e: KeyboardEvent) => boolean; // sees each key first; true = used (the command list)
+  onText?: () => void; // the text changed
+  interceptSend?: (text: string, attachments: string[]) => boolean; // true = do not send, keep the text
 }
 interface Composer {
   focus: () => void;
+  submit: () => void;
+  setText: (t: string) => void;
+  clear: () => void;
   setDraftKey: (k: string | null) => void;
   restore: (t: string, att: string[]) => void;
 }
@@ -619,7 +667,8 @@ function readB64(blob: Blob): Promise<string> {
 }
 // one composer box (Composer.swift ComposerBox): growing text, attachment chips, paste / drop, a draft per key.
 // The Ask box on Home and the composer of the Session page both use it.
-function makeComposer({ box, text, chips, file, attach, min, max, draft, onSend }: ComposerParts): Composer {
+function makeComposer(parts: ComposerParts): Composer {
+  const { box, text, chips, file, attach, min, max, draft, onSend } = parts;
   let draftKey = draft; // localStorage key of the draft (null: no draft)
   let files: string[] = []; // absolute paths on the server
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -635,8 +684,10 @@ function makeComposer({ box, text, chips, file, attach, min, max, draft, onSend 
     fit();
     clearTimeout(draftTimer);
     draftTimer = setTimeout(saveDraft, 400);
+    parts.onText?.();
   });
   text.addEventListener('keydown', (e) => {
+    if (parts.onKey?.(e) === true) return;
     if ((e.key === 'Enter' || e.key === 'NumpadEnter') && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       submit();
@@ -650,13 +701,17 @@ function makeComposer({ box, text, chips, file, attach, min, max, draft, onSend 
     const t = text.value.trim();
     if (!t && files.length === 0) return;
     const att = [...files];
+    if (parts.interceptSend?.(t, att) === true) return;
+    clear();
+    text.focus();
+    onSend(t, att);
+  }
+  function clear(): void {
     text.value = '';
     setFiles([]);
     clearTimeout(draftTimer);
     saveDraft();
     fit();
-    text.focus();
-    onSend(t, att);
   }
   const displayName = (p: string): string => baseName(p).replace(/^\d{10,}-/, '');
   function setFiles(list: string[]): void {
@@ -778,6 +833,16 @@ function makeComposer({ box, text, chips, file, attach, min, max, draft, onSend 
     focus() {
       text.focus();
     },
+    submit,
+    clear,
+    // replace the text (a command picked from the list); the cursor goes to the end
+    setText(t) {
+      text.value = t;
+      text.setSelectionRange(t.length, t.length);
+      clearTimeout(draftTimer);
+      saveDraft();
+      fit();
+    },
     // another draft key (the Session page: one draft per session); the files are dropped
     setDraftKey(k) {
       if (k === draftKey) return;
@@ -811,6 +876,25 @@ const ask = makeComposer({
   onSend: (t, att) => {
     void sendRequest(t, att);
   },
+  onKey: (e) => picker.key(e),
+  onText: () => {
+    picker.textChanged();
+  },
+  interceptSend: (t, att) => picker.sending(t, att),
+});
+// "/" in the Ask box: Claude Code's commands; a command runs in the session the user chooses
+const picker = makeCommandMenu({
+  text: $as('#ask-text', HTMLTextAreaElement),
+  list: $('#ask-commands'),
+  submit: ask.submit,
+  setText: ask.setText,
+  clear: ask.clear,
+  sessions: () => sessions,
+  defaultFolder: () => defaultFolder,
+  toast,
+  send: (text, files, target, name) => {
+    void sendCommand(text, files, target, name);
+  },
 });
 
 /** An idle session that waits for the owner (server.ts Session.waits: its last reply asks a question, or
@@ -821,19 +905,12 @@ function shown(s: Session): Session {
   const question = s.waits.kind === 'draft' ? `Not sent: ${s.waits.text}` : s.waits.text;
   return { ...s, state: 'needs', question, options: [] };
 }
-function onState(list: Session[], snapshot = false): void {
+function onState(list: Session[], snapshot = false, early = false): void {
   for (const s of list) {
-    const p = prev.get(s.id);
-    if (p !== undefined && p !== s.state) {
-      if (s.state === 'needs')
-        notify(
-          `${s.name} needs you`,
-          has(s.question) ? s.question : `${agentName(s)} is waiting for your choice.`,
-          s.id,
-        );
-      if (p === 'working' && s.state === 'idle') notify(`${s.name} is done`, s.last ?? '', s.id);
-    }
+    const n = mayNotify(s) ? noticeFor(s, prev.get(s.id), agentName(s)) : null;
+    if (n) notify(n);
     prev.set(s.id, s.state);
+    if (s.state !== 'working') stopSent.delete(s.id); // the next working turn may be stopped again
     // Recent order: first seen = its last activity; leaving "working" = now (a running session keeps its place)
     if (!orderKey.has(s.id)) orderKey.set(s.id, s.activity ?? 0);
     else if (lastState.get(s.id) === 'working' && s.state !== 'working') orderKey.set(s.id, Date.now());
@@ -847,9 +924,18 @@ function onState(list: Session[], snapshot = false): void {
     }),
   );
   sessions = list;
-  // the open session went away while connected: All Sessions (MainWindow.swift)
   const open = page.name === 'session' ? page.id : null;
-  if (open !== null && !sessions.some((s) => s.id === open) && (connected || snapshot)) {
+  // a preparing row of a new session on a helper became that session: follow it (MainWindow.swift)
+  const became = open === null ? null : preparedSession(sessions, open);
+  if (became !== null) {
+    stateKey = key;
+    go('session', became, true);
+    render();
+    return;
+  }
+  // the open session went away while connected: All Sessions (MainWindow.swift); not on the empty
+  // snapshot a restarted server sends before its first poll
+  if (open !== null && !early && !sessions.some((s) => s.id === open) && (connected || snapshot)) {
     stateKey = key;
     go('sessions', undefined, true);
     render();
@@ -861,32 +947,33 @@ function onState(list: Session[], snapshot = false): void {
 }
 
 // ---------- notifications (main.swift: only when the app is not in front) ----------
-let audioCtx: AudioContext | undefined;
-function beep(): void {
-  try {
-    audioCtx ??= new AudioContext();
-    const o = audioCtx.createOscillator(),
-      g = audioCtx.createGain();
-    o.frequency.value = 880;
-    g.gain.value = 0.06;
-    o.connect(g);
-    g.connect(audioCtx.destination);
-    o.start();
-    o.stop(audioCtx.currentTime + 0.15);
-  } catch {
-    /* no audio */
-  }
+// The browser asks for permission on the first click on the page, or before the first notice.
+function askNotices(): void {
+  if ('Notification' in window && mayAskNotices(Notification.permission))
+    void Notification.requestPermission().catch(() => undefined);
 }
-function notify(title: string, body: string, id: string): void {
-  if (!document.hidden && document.hasFocus()) return; // the page is in front: no notice, as in the app
-  if (prefs.sound === true) beep();
-  if (prefs.notify !== true || !('Notification' in window) || Notification.permission !== 'granted') return;
+document.addEventListener('pointerdown', askNotices, { once: true, capture: true });
+function notify(n: Notice): void {
+  if (!showNotice({ hidden: document.hidden, focused: document.hasFocus() })) return;
+  if (!('Notification' in window)) return;
+  if (mayAskNotices(Notification.permission)) {
+    // a browser may ignore an ask without a click; the notice shows once the answer is yes
+    void Notification.requestPermission()
+      .then((p) => {
+        if (p === 'granted') postNotice(n);
+      })
+      .catch(() => undefined);
+    return;
+  }
+  if (Notification.permission === 'granted') postNotice(n);
+}
+function postNotice(n: Notice): void {
   try {
-    const n = new Notification(title, { body: body.slice(0, 180), tag: `${id}-${String(Date.now())}` });
-    n.addEventListener('click', () => {
+    const shown = new Notification(n.title, { body: n.body.slice(0, 180), tag: `${n.id}-${String(Date.now())}` });
+    shown.addEventListener('click', () => {
       window.focus();
-      go('session', id);
-      n.close();
+      go('session', n.id);
+      shown.close();
     });
   } catch {
     /* some browsers allow notices only from a service worker */
@@ -927,23 +1014,75 @@ function badge(n: number, force = false): void {
 }
 
 // ---------- sidebar (MainWindow.swift SidebarController) ----------
+// select mode: tick sessions and close them together (public/select.ts)
+const sel = new SelectMode();
+const selHooks: SelectHooks = {
+  sessions: () => sessions,
+  render: () => {
+    render();
+  },
+  close: (ids) => {
+    for (const id of ids) void closeSession(sessions.find((s) => s.id === id));
+  },
+};
+const selBar = mountBar(sel, selHooks);
+const tidyHooks: TidyHooks = {
+  ask: async () =>
+    api('tidy').catch((error: unknown) => {
+      if (error instanceof TypeError) toast('The server does not answer'); // fetch failed: api() showed nothing
+      throw error;
+    }),
+  render: () => {
+    render();
+  },
+};
+$('#rows').addEventListener('keydown', (e) => {
+  onRowsKey(e, sel);
+});
 function render(): void {
   const box = $('#rows');
+  // the rows are rebuilt: keep the keyboard focus on the same session row
+  const focused = document.activeElement;
+  const refocus = focused instanceof HTMLElement && box.contains(focused) ? focused.dataset['id'] : undefined;
+  const refocusSelect = focused instanceof HTMLElement && focused.classList.contains('side-h-btn');
   box.innerHTML = '';
-  const needs = sessions.filter((s) => s.state === 'needs');
+  sel.reload(sessions);
+  // this Mac's sessions under Needs You / Recent; each helper computer's under its own name
+  const local = sessions.filter((s) => !has(s.device));
+  const needs = local.filter((s) => s.state === 'needs');
   if (needs.length > 0) {
     box.append(header('Needs You'));
     for (const s of needs) box.append(row(s));
   }
-  const rest = sessions
+  const rest = local
     .filter((s) => s.state !== 'needs')
     .toSorted((a, b) => (orderKey.get(b.id) ?? 0) - (orderKey.get(a.id) ?? 0) || b.id.localeCompare(a.id));
   if (rest.length > 0) {
     box.append(header('Recent'));
     for (const s of rest) box.append(row(s));
   }
-  badge(needs.length);
+  // every helper computer has a header (also one without sessions: it may need an update)
+  for (const g of deviceGroups(peers, sessions, (id) => orderKey.get(id) ?? 0)) {
+    box.append(
+      deviceHeader(g, DEV_IC.pc, {
+        menu: (x, y) => {
+          deviceMenu(x, y, g.device, g.peer);
+        },
+        update: () => {
+          updateHelper(g.device);
+        },
+      }),
+    );
+    for (const s of g.sessions) box.append(row(s));
+  }
+  // Select / Done on the first session header ("Needs You" when a session needs you; never a helper's header)
+  // with Tidy left of it (public/tidy.ts: the AI suggests which sessions to close)
+  box.querySelector('.side-h:not(.side-dev)')?.append(tidyButton(sel, tidyHooks), headerButton(sel, selHooks));
+  if (refocus !== undefined) box.querySelector<HTMLElement>(`.row[data-id="${CSS.escape(refocus)}"]`)?.focus();
+  if (refocusSelect) box.querySelector<HTMLElement>('.side-h-btn')?.focus(); // Select / Done pressed
+  badge(sessions.filter((s) => s.state === 'needs').length);
   markSelection();
+  selBar.update();
   renderSessionsPage();
   renderHome();
   jumpIfSent();
@@ -952,10 +1091,12 @@ function render(): void {
 function header(t: string): HTMLDivElement {
   const h = document.createElement('div');
   h.className = 'side-h';
-  h.textContent = t;
   h.dataset['testid'] = `header.${t}`;
-  h.setAttribute('role', 'heading');
-  h.setAttribute('aria-level', '3');
+  const name = document.createElement('span');
+  name.textContent = t;
+  name.setAttribute('role', 'heading');
+  name.setAttribute('aria-level', '3');
+  h.append(name); // Select / Done goes next to it, not inside the heading
   return h;
 }
 function row(s: Session): HTMLButtonElement {
@@ -964,18 +1105,20 @@ function row(s: Session): HTMLButtonElement {
   b.dataset['id'] = s.id;
   b.dataset['testid'] = `session.${s.name}`;
   b.setAttribute('aria-label', `${s.name}, ${label(s)}`);
-  b.title = short(s.folder);
+  b.title = rowTip(s, short);
+  if (isOffline(s)) b.classList.add('offline'); // a helper computer that does not answer: grey
   const needs = s.state === 'needs';
   b.innerHTML =
     `<span class="dot ${stateClass(s.state)}"></span><span class="rt"><span class="rn"><span class="nm">${esc(s.name)}</span>${agentBadge(s)}</span>${has(s.title) ? `<span class="sub">${esc(s.title)}</span>` : ''}</span>` +
     `<span class="tm${needs ? ' needs' : ''}">${needs ? 'Needs you' : esc(ago(s.activity))}</span>`;
   b.addEventListener('click', () => {
-    go('session', s.id);
+    if (!rowClick(s, sel, selHooks)) go('session', s.id);
   });
   b.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showMenu(e.clientX, e.clientY, s);
   });
+  if (sel.selecting) asCheckRow(b, s, sel);
   return b;
 }
 function markSelection(): void {
@@ -983,7 +1126,7 @@ function markSelection(): void {
     n.classList.toggle('sel', page.name === n.dataset['page']);
   const open = page.name === 'session' ? page.id : null;
   for (const r of document.querySelectorAll<HTMLElement>('#sidebar .row'))
-    r.classList.toggle('sel', open !== null && r.dataset['id'] === open);
+    r.classList.toggle('sel', !sel.selecting && open !== null && r.dataset['id'] === open);
 }
 for (const n of document.querySelectorAll<HTMLElement>('#sidebar .nav'))
   n.addEventListener('click', () => {
@@ -991,49 +1134,45 @@ for (const n of document.querySelectorAll<HTMLElement>('#sidebar .nav'))
     if (isPage(p)) go(p);
   });
 
-// ---------- join requests at the top of the sidebar (MainWindow.swift .join rows) ----------
-let joinsKey: string | null = null;
-const deciding = new Set<string>(); // ids with an Approve / Ignore on the way
-function onJoins(list: JoinRequest[]): void {
-  const k = JSON.stringify(list.map((r) => [r.id, r.name, r.os]));
-  if (k === joinsKey) return;
-  joinsKey = k;
-  for (const id of deciding) if (!list.some((r) => r.id === id)) deciding.delete(id);
-  const box = $('#joins');
-  box.innerHTML = '';
-  if (list.length === 0) return;
-  box.append(header('Wants to Join'));
-  for (const r of list) box.append(joinRow(r));
+// ---------- helper computers: headers and "Update <device>" (helper_update.ts) ----------
+let peers: PeerInfo[] = [];
+let peersKey = '';
+function onPeers(list: PeerInfo[]): void {
+  const k = JSON.stringify(list);
+  if (k === peersKey) return;
+  peersKey = k;
+  peers = list;
+  stateKey = null; // the sidebar draws again with the next sessions list
 }
-function joinRow(r: JoinRequest): HTMLDivElement {
-  const d = document.createElement('div');
-  d.className = 'join';
-  d.dataset['testid'] = `join.${r.name}`;
-  d.setAttribute('role', 'group');
-  d.setAttribute('aria-label', r.title);
-  const os = r.notice ?? r.system;
-  d.innerHTML =
-    `<span class="jt"><span class="nm">${esc(r.name)}</span><span class="sub">${esc(os)}</span></span>` +
-    `<span class="jb"><button class="btn small primary" data-testid="join.approve.${esc(r.name)}">Approve</button>` +
-    `<button class="btn small" data-testid="join.ignore.${esc(r.name)}">Ignore</button></span>`;
-  const [ok, no] = d.querySelectorAll('button');
-  const decide = (decision: 'approve' | 'ignore') => async (): Promise<void> => {
-    if (ok === undefined || no === undefined) return;
-    ok.disabled = no.disabled = true;
-    deciding.add(r.id);
-    try {
-      await api('setupCloudDevice', { id: r.id, decision });
-      toast(decision === 'approve' ? `${r.name} can join now` : `${r.name} is ignored`);
-    } catch {
-      deciding.delete(r.id);
-      ok.disabled = no.disabled = false;
-    }
-  };
-  ok?.addEventListener('click', run(decide('approve')));
-  no?.addEventListener('click', run(decide('ignore')));
-  if (deciding.has(r.id) && ok !== undefined && no !== undefined) ok.disabled = no.disabled = true;
-  return d;
+/** "Update <device>" (header menu and button): the server sends this Mac's Thoth to the helper. */
+function updateHelper(device: string): void {
+  api('updateHelper', { device, updateId: newUpdateId() }).catch(() => {
+    // refused (toast shown): draw the sidebar again, so the greyed button can be clicked again
+    stateKey = null;
+    render();
+  });
 }
+/** The header's menu: "Update <device>", greyed unless the helper is older (or failed) and online. */
+function deviceMenu(x: number, y: number, device: string, peer: PeerInfo | undefined): void {
+  menuAt(x, y, [
+    [
+      `Update ${device}`,
+      showsUpdateButton(peer)
+        ? () => {
+            updateHelper(device);
+          }
+        : null,
+    ],
+  ]);
+}
+
+// ---------- join requests at the top of the sidebar (MainWindow.swift .join rows): joins.ts ----------
+const joins = joinRequests($('#joins'), {
+  esc,
+  header,
+  api,
+  toast,
+});
 
 // ---------- All Sessions (SessionsViewController.swift): one section per project folder ----------
 const RANK: Record<string, number> = {
@@ -1064,25 +1203,30 @@ function renderSessionsPage(): void {
   }
   empty.classList.add('hidden');
   const groups = new Map<string, Session[]>();
+  // a helper computer's folder is its own group (same path, other computer)
   for (const s of shown) {
-    const g = groups.get(s.folder);
+    const g = groups.get(groupKey(s));
     if (g) g.push(s);
-    else groups.set(s.folder, [s]);
+    else groups.set(groupKey(s), [s]);
   }
   // groups with the most urgent session first, then the newest activity
   const minRank = (l: Session[]): number => Math.min(...l.map((s) => rank(s)));
   const newest = (l: Session[]): number => Math.max(...l.map((x) => x.activity ?? 0));
   const ordered = [...groups].toSorted(([, a], [, b]) => minRank(a) - minRank(b) || newest(b) - newest(a));
-  for (const [folder, items] of ordered) box.append(folderSection(folder, items));
+  for (const [, items] of ordered) box.append(folderSection(items[0]?.folder ?? '', items));
 }
 function folderSection(folder: string, items: Session[]): HTMLElement {
   const sec = document.createElement('section');
   sec.className = 'fsec';
   sec.dataset['testid'] = `section.${baseName(folder)}`;
   const branch = items[0]?.branch ?? '';
+  const device = items[0]?.device ?? '';
   sec.innerHTML =
     `<div class="fsec-h">${FOLDER_IC}<span class="fsec-name">${esc(baseName(folder) || folder)}</span>` +
-    `<span class="fsec-path" title="${esc(folder)}">${esc(short(folder) + (branch ? '  ·  ⎇ ' + branch : ''))}</span></div><div class="grid"></div>`;
+    `<span class="fsec-path" title="${esc(folder)}"${device ? ` data-testid="sessions.device.${esc(device)}"` : ''}>${esc(sectionPlace(folder, items, short) + (branch ? '  ·  ⎇ ' + branch : ''))}</span></div><div class="grid"></div>`;
+  const grid = within(sec, '.grid');
+  for (const s of items.toSorted((a, b) => rank(a) - rank(b))) grid.append(sessionCard(s));
+  if (device) return sec; // a new session on a helper computer starts from New Session (Computer)
   const add = mkBtn(
     'New Session Here',
     'btn small',
@@ -1091,18 +1235,17 @@ function folderSection(folder: string, items: Session[]): HTMLElement {
   );
   add.dataset['testid'] = `section.${baseName(folder)}.new`;
   within(sec, '.fsec-h').append(add);
-  const grid = within(sec, '.grid');
-  for (const s of items.toSorted((a, b) => rank(a) - rank(b))) grid.append(sessionCard(s));
   return sec;
 }
 // a card, exactly 150 px high: dot, name, Codex badge, state; AI title; "You:" line; reply (3 lines)
 function sessionCard(s: Session): HTMLDivElement {
   const t = document.createElement('div');
-  t.className = 'card click tile' + (s.state === 'needs' ? ' tint-red' : '');
+  t.className = 'card click tile' + (s.state === 'needs' ? ' tint-red' : '') + (isOffline(s) ? ' offline' : '');
   t.dataset['testid'] = `card.${s.name}`;
   t.setAttribute('role', 'button');
   t.tabIndex = 0;
-  t.setAttribute('aria-label', `${s.name}, ${label(s)}`);
+  const on = isRemote(s) ? `, on ${s.device ?? ''}${isOffline(s) ? ', offline' : ''}` : '';
+  t.setAttribute('aria-label', `${s.name}, ${label(s)}${on}`);
   let reply = has(s.last) ? s.last : '—';
   if (s.state === 'needs') reply = has(s.question) ? s.question : 'Waiting for your choice';
   t.innerHTML =
@@ -1219,6 +1362,8 @@ interface Device {
   sessions?: number;
   error?: string;
   os?: string;
+  online?: boolean | null; // the brain's heartbeat (brain/heartbeat.py)
+  last_heartbeat?: number | null;
 }
 interface BrainSession {
   sid: string;
@@ -1324,18 +1469,14 @@ function deviceChip(d: Device): HTMLDivElement {
   c.setAttribute('role', 'button');
   c.tabIndex = 0;
   c.setAttribute('aria-label', `Device ${d.name}`);
-  const ok = devOk(d);
-  const silent = ok && d.silent === true;
-  const synced = d.last_sync === undefined || d.last_sync === '' ? 'never' : ago(Number(d.last_sync) * 1000);
-  const n = d.sessions ?? 0;
-  let detail = `offline: ${d.error ?? ''}`;
-  if (silent) detail = `${String(n)} sessions · nothing new for ${synced}`;
-  else if (ok) detail = `${String(n)} sessions · synced ${synced}`;
+  const silent = devOk(d) && d.silent === true;
+  // the brain's own error stays the text; a stopped heartbeat says "Offline · last seen" (device_status.ts)
+  const detail = chipText(d, ago);
   const win = (d.os ?? '').toLowerCase().includes('windows');
   c.innerHTML =
-    `<span class="dot ${ok && !silent ? 'idle' : 'needs'}"></span>${win ? DEV_IC.pc : DEV_IC.laptop}` +
+    `<span class="dot ${detail.good ? 'idle' : 'needs'}"></span>${win ? DEV_IC.pc : DEV_IC.laptop}` +
     `<span class="ct"><span class="cn">${esc(d.name + (d.transport === 'local' ? ` (${here()})` : ''))}</span>` +
-    `<span class="cd${silent ? ' warn' : ''}">${esc(detail)}</span></span>`;
+    `<span class="cd${detail.warn ? ' warn' : ''}">${esc(detail.text)}</span></span>`;
   const only = (): void => {
     devPick.value = d.name;
     queryChanged();
@@ -1849,14 +1990,23 @@ const nameEdit = $as('#d-name-edit', HTMLInputElement);
 let mode: 'chat' | 'terminal' = stored('ccp.mode') === 'terminal' ? 'terminal' : 'chat';
 let chatWin: string | null = null; // the session the chat frame shows
 let inlineRename = false; // the name in the header is being edited
+// the view shown: a helper computer's session is always Chat (no terminal through the relay)
+// (one rule with detailView: the session's device; its id before the state lists it)
+const shownMode = (): 'chat' | 'terminal' => (isRemote(cur() ?? { device: helperOf(selected ?? '') }) ? 'chat' : mode);
 function openChat(id: string | null): void {
-  if (mode !== 'chat' || !has(id)) return;
+  if (shownMode() !== 'chat' || !has(id)) return;
   const q = lookQuery();
   const want = `/chat.html?win=${encodeURIComponent(id)}${q ? '&' + q : ''}`;
   if (chatWin === want) return;
   chatWin = want;
   chatFrame.src = want;
 }
+// the chat frame asks for a toast (a file Claude sent on a helper computer: chat.ts)
+addEventListener('message', (e: MessageEvent<unknown>) => {
+  if (e.origin !== location.origin || e.source !== chatFrame.contentWindow) return;
+  const d = e.data as { type?: unknown; text?: unknown } | null;
+  if (d?.type === 'toast' && typeof d.text === 'string') toast(d.text.slice(0, 200));
+});
 function pollChat(): void {
   try {
     chatFrame.contentWindow?.pollNow?.();
@@ -1866,14 +2016,14 @@ function pollChat(): void {
 }
 function focusMain(): void {
   if (page.name !== 'session' || anyDialog() !== undefined) return;
-  if (mode === 'chat') {
+  if (shownMode() === 'chat') {
     if (!$('#composer').classList.contains('hidden')) msgBox.focus();
   } else term.focus();
 }
 function applyMode(focus: boolean): void {
-  const chat = mode === 'chat';
+  const chat = shownMode() === 'chat';
   for (const b of document.querySelectorAll<HTMLElement>('#d-mode [data-mode]')) {
-    const on = b.dataset['mode'] === mode;
+    const on = b.dataset['mode'] === shownMode();
     b.classList.toggle('on', on);
     b.setAttribute('aria-checked', String(on));
     b.setAttribute('role', 'radio');
@@ -1905,27 +2055,37 @@ function renderDetail(): void {
   const pill = $('#d-state');
   pill.className = `pill ${stateClass(s.state)}`;
   pill.textContent = label(s);
-  $('#d-path').textContent = short(s.folder) + (has(s.branch) ? `  ·  ⎇ ${s.branch}` : '');
+  const v = detailView(s, mode);
+  if (v.chatOnly && chatFrame.classList.contains('hidden')) {
+    applyMode(false); // calls renderDetail again with the chat shown
+    return;
+  }
+  $('#d-path').textContent = placeText(s, short) + (has(s.branch) ? `  ·  ⎇ ${s.branch}` : '');
   $('#d-path').title = s.folder;
-  $('#a-start').classList.toggle('hidden', s.running);
+  // a helper computer's session: Chat only; its folder is on that computer (no Finder, VS Code, Close)
+  $('#d-mode').classList.toggle('hidden', v.chatOnly);
+  for (const sel of ['#a-finder', '#a-code']) $(sel).classList.toggle('hidden', !v.localOnly);
+  $('#a-close').classList.toggle('hidden', !v.close); // a pending row on a helper: closing cancels it
+  $('#d-edit').classList.toggle('hidden', !v.rename);
+  $('#a-start').classList.toggle('hidden', !v.start);
   $('#a-start span').textContent = has(s.sid) ? 'Resume' : 'Start';
-  $('#a-stop').classList.toggle('hidden', s.state !== 'working');
+  $('#a-stop').classList.toggle('hidden', !v.stop);
   $('#a-fetch').classList.toggle('hidden', !canFetch(s));
   $('#a-fetch span').textContent = isFetching(s) ? 'Cancel Fetch' : 'Fetch Result';
-  renderChoices(s, who);
+  renderChoices(s, who, v.choices);
   renderNotice(s, who);
-  // the composer only in Chat mode and only while the agent runs
+  // the composer only in Chat mode and only while the agent runs (not for a helper that does not answer)
   const composer = $('#composer');
   const wasHidden = composer.classList.contains('hidden');
-  composer.classList.toggle('hidden', !(mode === 'chat' && s.running));
+  composer.classList.toggle('hidden', !v.composer);
   if (wasHidden !== composer.classList.contains('hidden')) requestAnimationFrame(refit);
 }
 // choice bar: Claude's menu as buttons, at the end of the chat (Chat mode only)
-function renderChoices(s: Session, who: string): void {
+function renderChoices(s: Session, who: string, show: boolean): void {
   const ch = $('#choice');
   const opts = s.options ?? [];
   const key = s.state === 'needs' ? opts.map((o) => o.label).join('|') : '';
-  ch.classList.toggle('hidden', !key || mode !== 'chat');
+  ch.classList.toggle('hidden', !key || !show);
   if (key === ch.dataset['key']) return;
   ch.dataset['key'] = key;
   $('#choice-q').textContent = has(s.question) ? s.question : `${who} needs your decision`;
@@ -1957,7 +2117,14 @@ function renderChoices(s: Session, who: string): void {
 function renderNotice(s: Session, who: string): void {
   const nt = $('#notice');
   let text = '';
-  if (s.state === 'elsewhere')
+  if (isOffline(s) && has(s.device)) {
+    // the last state the helper sent: this notice only
+    nt.textContent = offlineNotice(s.device);
+    nt.classList.remove('hidden');
+    return;
+  }
+  if (isPending(s)) text = pendingNotice(s);
+  else if (s.state === 'elsewhere')
     text =
       'This conversation is open in another window (VS Code or a terminal). Click Resume to move it here: the other copy is closed and the conversation continues in the panel. A message sent here does the same.';
   else if (s.state === 'stopped')
@@ -2061,9 +2228,12 @@ function show(p: Page): void {
       $('#choice').dataset['key'] = '-'; // a new session: build the choice bar again
       detailComposer.setDraftKey(`draft.${newSel}`);
       applyMode(false);
-      requestAnimationFrame(() => {
-        attach(newSel);
-      });
+      // a helper computer's session has no terminal on this Mac: only Chat
+      if (helperOf(newSel) === '')
+        requestAnimationFrame(() => {
+          attach(newSel);
+        });
+      else detach();
     }
   }
   if (p.name === 'devices') devicesShown(); // the app reloads the devices each time the page shows, the query once
@@ -2138,7 +2308,7 @@ async function closeSession(s: Session | undefined): Promise<void> {
 // inline rename in the header: double-click the name or click the pencil; Enter or leaving saves, Esc restores
 function startInlineRename(): void {
   const s = cur();
-  if (!s || inlineRename) return;
+  if (!s || inlineRename || isPending(s)) return; // a row still preparing cannot be renamed
   inlineRename = true;
   nameEdit.value = s.name;
   $('#d-name').classList.add('hidden');
@@ -2238,8 +2408,21 @@ const detailComposer = makeComposer({
 });
 
 // ---------- context menu (SessionMenu: same labels and order) ----------
-type MenuItem = readonly [string, () => void];
+type MenuItem = readonly [string, (() => void) | null]; // null: shown greyed, does nothing
 function showMenu(x: number, y: number, s: Session): void {
+  // a new session on a helper, not started: closing it cancels it there and removes its folder
+  if (isPending(s)) {
+    menuAt(x, y, [
+      [
+        'Open',
+        () => {
+          go('session', s.id);
+        },
+      ],
+      [pendingMenuLabel(s.state), () => void closeSession(s)],
+    ]);
+    return;
+  }
   menuAt(x, y, [
     [
       'Open',
@@ -2287,9 +2470,10 @@ function menuAt(x: number, y: number, list: (MenuItem | '-' | false)[]): void {
     const b = document.createElement('button');
     b.textContent = text;
     b.setAttribute('role', 'menuitem');
+    if (fn === null) b.disabled = true;
     b.addEventListener('click', () => {
       hideMenu();
-      fn();
+      fn?.();
     });
     m.append(b);
   }
@@ -2319,7 +2503,7 @@ for (const d of document.querySelectorAll<HTMLElement>('#settings, #rename, #rou
   });
 }
 
-// Settings: the look (SettingsWindow.swift) and this browser's notices
+// Settings: the look (SettingsWindow.swift)
 function openSettings(): void {
   for (const c of document.querySelectorAll<HTMLElement>('.look-card'))
     c.classList.toggle('on', c.dataset['look'] === look());
@@ -2330,27 +2514,6 @@ for (const c of document.querySelectorAll<HTMLElement>('.look-card'))
     setLook(c.dataset['look'] ?? 'original');
   });
 $('#btn-settings').addEventListener('click', openSettings);
-const optNotify = $as('#opt-notify', HTMLInputElement),
-  optSound = $as('#opt-sound', HTMLInputElement);
-optNotify.checked = prefs.notify === true;
-optSound.checked = prefs.sound === true;
-optNotify.addEventListener(
-  'change',
-  run(async () => {
-    prefs.notify = optNotify.checked;
-    savePrefs();
-    if (!prefs.notify || !('Notification' in window)) return;
-    if (Notification.permission === 'default') await Notification.requestPermission();
-    if (Notification.permission === 'denied')
-      toast('The browser blocks notices for this page. Allow them in the site settings.');
-  }),
-);
-optSound.addEventListener('change', () => {
-  prefs.sound = optSound.checked;
-  savePrefs();
-  if (prefs.sound) beep();
-});
-
 // ---------- New Session dialog (NewSessionController.swift) ----------
 let modalRoute: string | null = null;
 const mFolder = $as('#m-folder', HTMLInputElement);
@@ -2389,9 +2552,38 @@ async function loadAgents(): Promise<void> {
 setAgent(newAgent, false);
 let histSel: HistoryEntry | null = null; // the selected row's history item
 let histSeq = 0;
+// "Computer:" (NewSessionController): where a new conversation starts; one request id per dialog
+const mComputer = $as('#m-computer', HTMLSelectElement);
+let newRequestId = '';
+let computersSeq = 0;
+async function loadComputers(): Promise<void> {
+  const seq = ++computersSeq; // only the newest load fills the list (a reopened dialog)
+  const here = serverPlatform && serverPlatform !== 'darwin' ? 'This computer' : 'This Mac';
+  const fill = (list: { device: string; online: boolean }[]): void => {
+    mComputer.innerHTML = '';
+    for (const c of computerOptions(here, list)) {
+      const o = document.createElement('option');
+      o.value = c.value;
+      o.textContent = c.label;
+      o.disabled = c.disabled;
+      mComputer.append(o);
+    }
+    mComputer.value = '';
+  };
+  fill([]);
+  const r = (await getJson('/api/peers')) as { peers?: { device: string; online: boolean }[] } | null;
+  if (seq !== computersSeq || $('#modal').classList.contains('hidden')) return;
+  fill(Array.isArray(r?.peers) ? r.peers : []);
+  void loadHistory(); // the list starts at this Mac again: the history matches it
+}
+mComputer.addEventListener('change', () => void loadHistory());
 async function openNew(folder?: string, routeId?: string): Promise<void> {
   modalRoute = routeId ?? null;
   $('#m-title').textContent = modalRoute === null ? 'New Session' : 'Send Request to a New Session';
+  // a request the router already holds goes to this Mac's sessions
+  $('#m-computer-wrap').classList.toggle('hidden', modalRoute !== null);
+  newRequestId = randomHex(8);
+  void loadComputers();
   // "Choose…" opens a macOS folder dialog on the server's screen: only when the server runs on macOS
   $('#m-browse').classList.toggle('hidden', !canChooseFolder(serverPlatform));
   $('#modal').classList.remove('hidden');
@@ -2435,6 +2627,11 @@ async function loadHistory(): Promise<void> {
   };
   if (!folder) {
     empty('Choose a folder first.');
+    return;
+  }
+  if (mComputer.value !== '') {
+    histSeq++; // a history request on the way is not shown
+    empty(helperHistoryText(mComputer.value));
     return;
   }
   empty('Loading…');
@@ -2513,6 +2710,8 @@ $('#m-fresh').addEventListener('click', () => {
 async function create(folder: string, sid: string, agent?: string): Promise<void> {
   const chosen = agent ?? newAgent;
   const rid = modalRoute;
+  const computer = mComputer.value,
+    requestId = newRequestId;
   closeModal();
   try {
     if (rid !== null && !sid) {
@@ -2520,8 +2719,11 @@ async function create(folder: string, sid: string, agent?: string): Promise<void
       if (has(id)) go('session', id);
       return;
     }
-    const { id } = await api('new', { folder, sid, agent: chosen });
-    if (has(id))
+    const device = rid === null ? computer : '';
+    const { id } = await api('new', newBody(folder, sid, chosen, device, requestId));
+    // a helper: the server answers at once with the preparing row; it becomes the session there
+    if (has(id) && device !== '' && !sid) go('session', id);
+    else if (has(id))
       setTimeout(() => {
         go('session', id);
       }, 500);
@@ -2644,7 +2846,26 @@ document.addEventListener(
         e.stopPropagation();
         return;
       }
-      if (document.body.classList.contains('side-open')) toggleSidebar();
+      if (document.body.classList.contains('side-open')) {
+        toggleSidebar();
+        return;
+      }
+      // Stop (Esc): the session menu's key, as in the app
+      const openId = page.name === 'session' ? page.id : null;
+      const s = sessions.find((x) => x.id === openId);
+      const stops = escapeStops({
+        page: page.name,
+        state: s?.state ?? '',
+        inTerminal: inTerminal(e.target),
+        editable: editable(e.target),
+        repeat: e.repeat,
+        sent: s !== undefined && stopSent.has(s.id),
+      });
+      if (s && stops) {
+        e.preventDefault();
+        stopSent.add(s.id);
+        void api('interrupt', { id: s.id }).catch(() => undefined);
+      }
       return;
     }
     const code = e.code;

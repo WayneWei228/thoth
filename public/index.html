@@ -70,7 +70,12 @@
           </button>
           <input id="ask-file" type="file" multiple hidden accept=".png,.jpg,.jpeg,.gif,.webp,.heic,.pdf,.txt,.md,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.log,.ipynb,.py,.js,.ts,.swift,.java,.go,.rs,.c,.cpp,.h,.rb,.sh,.sql">
         </form>
-        <p class="home-hint">Enter to send · Shift+Enter for a new line · paste or drop images</p>
+        <!-- Claude Code commands: CommandMenu.swift SuggestionList (public/command_menu.ts) -->
+        <div id="ask-commands" class="cmd-list hidden" role="listbox" aria-label="Claude Code commands" data-testid="home.commands">
+          <div class="cmd-head"></div>
+          <div class="cmd-scroll" data-testid="home.commands.scroll"></div>
+        </div>
+        <p class="home-hint">Enter to send · Shift+Enter for a new line · / for Claude Code commands · paste or drop images</p>
         <div id="needs-wrap" class="home-group hidden">
           <h2 class="home-h">Needs you</h2>
           <div id="needs" class="home-list"></div>
@@ -189,7 +194,12 @@
 <!-- New Session: NewSessionController.swift -->
 <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="m-title" data-testid="newSession">
   <div class="modal-card new-card">
-    <h3 id="m-title">New Session</h3>
+    <div class="m-head">
+      <h3 id="m-title">New Session</h3>
+      <!-- "This Mac", then the helper computers (GET /api/peers): NewSessionController.computerPopup -->
+      <label id="m-computer-wrap" class="m-computer" title="Where the new conversation runs. On another computer, the code of this folder's git project goes there; your checkout does not change.">Computer:
+        <select id="m-computer" class="recent-pop" data-testid="newSession.computer"></select></label>
+    </div>
     <div class="label first">1. Project folder</div>
     <div class="folder-row">
       <input id="m-folder" placeholder="/path/to/project" autocomplete="off" spellcheck="false">
@@ -233,7 +243,7 @@
   </div>
 </div>
 
-<!-- Settings: the look, as in the Mac app; Notify and Sound are browser only -->
+<!-- Settings: the look, as in the Mac app (SettingsWindow.swift) -->
 <div id="settings" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-h">
   <div class="modal-card settings-card">
     <header><h3 id="settings-h">Appearance</h3><button class="x" data-close aria-label="Close">✕</button></header>
@@ -246,9 +256,6 @@
         <span class="look-t">Website</span><span class="look-d">Ink on paper, like the Thoth website. Light only.</span>
       </button>
     </div>
-    <h4 class="sec-h">This browser</h4>
-    <label class="toggle"><input type="checkbox" id="opt-notify"> Notify me when a session needs me or is done (only when this page is in the background)</label>
-    <label class="toggle"><input type="checkbox" id="opt-sound"> Sound</label>
   </div>
 </div>
 
@@ -303,6 +310,7 @@
     </div>
   </div>
 </div>
+
 
 <div id="menu" class="ctx hidden" role="menu"></div>
 <div id="toast" class="toast hidden" role="status"></div>

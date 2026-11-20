@@ -1,4 +1,5 @@
-// `thoth always-on`: keep this Mac on as a helper computer (multi-device plan, PR 2).
+// `thoth always-on`: keep this Mac on as a helper computer (multi-device plan, PR 2). On Windows (in
+// WSL) the same command sets the Windows power settings and keeps WSL running: lib/always_on_windows.ts.
 //   - launchd user services run the Thoth server (with its relay client) and the brain without the
 //     app, start them at login and restart them when they stop (scripts/services.sh install).
 //   - The Mac does not sleep in any case (owner decision 2026-11-19): `pmset -a sleep 0` (AC and
@@ -15,6 +16,8 @@
 // commands go through `Deps.run`, so the tests use a fake and never call sudo or pmset.
 import fs from 'node:fs';
 import path from 'node:path';
+
+import * as Win from './always_on_windows.ts';
 
 export interface RunResult {
   code: number;
@@ -39,6 +42,10 @@ export interface Deps {
   log: (line: string) => void;
   /** false: no terminal can ask for the sudo password (for example the shell of Claude Code). Default true. */
   tty?: boolean;
+  /** this Linux runs inside WSL (lib/wsl.ts): the Windows branch (lib/always_on_windows.ts) */
+  wsl?: boolean;
+  /** the WSL distro (WSL_DISTRO_NAME): the task ThothWSL starts it */
+  distro?: string;
 }
 
 /** The pmset values this command changes. null: pmset did not show the setting. */
@@ -71,14 +78,17 @@ export function hasTerminal(stdin: { isTTY?: boolean }): boolean {
 /** The command line: the action, or an error (an unknown option, or options that do not go together). */
 export function parseArgs(
   args: readonly string[],
-): { action: 'enable' | 'undo' | 'status' | 'help' } | { error: string } {
-  const known = new Set(['--lid', '--undo', '--status', '-h', '--help']);
+): { action: 'enable' | 'undo' | 'status' | 'doctor' | 'help' } | { error: string } {
+  const known = new Set(['--lid', '--undo', '--status', '--doctor', '-h', '--help']);
   const unknown = args.find((a) => !known.has(a));
   if (unknown !== undefined) return { error: `unknown option ${unknown}` };
   const has = (a: string): boolean => args.includes(a);
   if (has('--undo') && (has('--status') || has('--lid'))) return { error: '--undo goes alone' };
   if (has('--status') && has('--lid')) return { error: '--status goes alone' };
+  // --doctor: the rows `thoth doctor` shows (scripts/services.sh calls it)
+  if (has('--doctor') && args.length > 1) return { error: '--doctor goes alone' };
   if (has('-h') || has('--help')) return { action: 'help' };
+  if (has('--doctor')) return { action: 'doctor' };
   if (has('--undo')) return { action: 'undo' };
   if (has('--status')) return { action: 'status' };
   // --lid: the old option for the lid; the lid is always included now, so it changes nothing
@@ -342,8 +352,11 @@ function servicesInstalled(d: Deps): boolean {
   return d.run(d.services, ['installed']).code === 0;
 }
 
-function macOnly(d: Deps): void {
-  if (d.platform !== 'darwin') throw new Error('thoth always-on works on macOS only in this version');
+/** macOS (pmset) or Windows through WSL (powercfg); other systems are not supported. */
+function system(d: Deps): 'mac' | 'wsl' {
+  if (d.platform === 'darwin') return 'mac';
+  if (d.platform === 'linux' && d.wsl === true) return 'wsl';
+  throw new Error('thoth always-on works on macOS and on Windows (in WSL) only in this version');
 }
 
 function show(v: string | null): string {
@@ -363,7 +376,10 @@ function powerLines(v: PowerValues): string[] {
 
 /** `thoth always-on`. Safe to run again: the saved values stay those from the first run. */
 export function enable(d: Deps): void {
-  macOnly(d);
+  if (system(d) === 'wsl') {
+    Win.enableWsl(d);
+    return;
+  }
   const saved = readSaved(d);
   const now = readPower(d);
   const servicesBefore = saved ? saved.servicesBefore : servicesInstalled(d);
@@ -403,7 +419,10 @@ export function enable(d: Deps): void {
 /** `thoth always-on --undo`: the saved pmset values back; the services removed when this command
  * installed them. */
 export function undo(d: Deps): void {
-  macOnly(d);
+  if (system(d) === 'wsl') {
+    Win.undoWsl(d);
+    return;
+  }
   const saved = readSaved(d);
   if (!saved) {
     d.log('Nothing to undo: thoth always-on was not run on this Mac (no saved settings).');
@@ -430,7 +449,10 @@ export function undo(d: Deps): void {
 
 /** `thoth always-on --status`: what is set now. */
 export function status(d: Deps): void {
-  macOnly(d);
+  if (system(d) === 'wsl') {
+    Win.statusWsl(d);
+    return;
+  }
   const saved = readSaved(d);
   const now = readPower(d);
   d.log(`always-on: ${saved ? `on since ${saved.savedAt}` : 'off'}`);
@@ -439,4 +461,25 @@ export function status(d: Deps): void {
   const ac = onAC(d);
   d.log(`power source: ${ac === null ? 'unknown' : ac ? 'AC' : 'battery'}`);
   d.log(`reboot: ${rebootNote(d)}`);
+}
+
+/** `thoth always-on --doctor`: one line per row, `kind<TAB>title<TAB>fix<TAB>cause`, for `thoth doctor`
+ * (scripts/services.sh). Only WSL has rows now: the Mac doctor checks its services itself. */
+export function doctorLines(d: Deps): string[] {
+  if (d.platform !== 'linux' || d.wsl !== true) return [];
+  let rows: Win.DoctorRow[];
+  try {
+    rows = Win.wslRows(d);
+  } catch (e) {
+    // a broken always-on.json (or Windows not answering) is a problem to show, not silence
+    rows = [
+      {
+        kind: 'bad',
+        title: `always-on: ${e instanceof Error ? e.message : String(e)}`,
+        fix: `remove ${path.join(d.stateDir, STATE_FILE)} if the message says it is not valid (always-on then counts as off), or fix it by hand; else run: thoth always-on --status`,
+        cause: 'thoth always-on could not read its saved settings or ask Windows, so it cannot check the items.',
+      },
+    ];
+  }
+  return rows.map((r) => [r.kind, r.title, r.fix, r.cause ?? ''].map((x) => x.replace(/[\t\n]/g, ' ')).join('\t'));
 }

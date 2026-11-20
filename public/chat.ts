@@ -11,6 +11,7 @@ import {
   thinkingLabel,
   thoughtFor,
 } from './thinking.js';
+import { sentFileToast } from './helpers.js';
 
 // ---------- the items of /api/chat (lib/chat.ts) ----------
 interface ImageRef {
@@ -279,7 +280,7 @@ const FILE_ICON: Record<string, string> = {
   ipynb: '📓',
 };
 // sent: files Claude sent with SendUserFile. /api/file checks them against this session's
-// transcript; the attachments-only routes (/api/thumb, openFile) do not serve them.
+// transcript; the attachments-only routes (/api/thumb, /api/attachment, openFile) do not serve them.
 function fileGroup(files: FileRef[], { sent = false }: { sent?: boolean } = {}): HTMLDivElement {
   const box = document.createElement('div');
   box.className = 'files';
@@ -312,7 +313,16 @@ function fileGroup(files: FileRef[], { sent = false }: { sent?: boolean } = {}):
     }
     b.addEventListener('click', () => {
       if (!sent) {
-        toNative({ type: 'openFile', path: f.path });
+        // the app opens it with the default app; a browser shows it in a new tab
+        if (!toNative({ type: 'openFile', path: f.path }))
+          window.open(`/api/attachment?path=${encodeURIComponent(f.path)}`, '_blank', 'noopener');
+        return;
+      }
+      // a helper computer's session (lib/peer.ts): the file is on that computer; never opened here
+      const onHelper = sentFileToast(win);
+      if (onHelper !== null) {
+        if (!toNative({ type: 'openSent', win, path: f.path }))
+          window.parent.postMessage({ type: 'toast', text: onHelper }, location.origin);
         return;
       }
       const q = `win=${encodeURIComponent(win)}&path=${encodeURIComponent(f.path)}`;

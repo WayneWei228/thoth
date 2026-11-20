@@ -214,8 +214,9 @@ export function checkList(list: readonly string[], verbose: readonly string[] = 
 
 /** Why this copy cannot replace itself, or ''. A git checkout is updated with git, never replaced. */
 export function cannotUpdate(root: string, platform: string = process.platform): string {
-  // a Linux helper runs under systemd, which this update does not restart (macOS only)
-  if (platform !== 'darwin') return 'Remote updates work on macOS helpers only: update this computer by hand';
+  // macOS (launchd) and Linux, WSL included (systemd user units of scripts/services.sh, or a plain restart)
+  if (platform !== 'darwin' && platform !== 'linux')
+    return 'Remote updates work on macOS and Linux helpers only: update this computer by hand';
   if (fs.existsSync(path.join(root, '.git')))
     return 'This computer runs Thoth from a git checkout: update it with git there';
   if (!fs.existsSync(path.join(root, 'scripts', 'self-update.sh'))) return 'This copy has no update script';
@@ -228,8 +229,36 @@ export function launchdLabel(env: NodeJS.ProcessEnv): string {
   return /^com\.claudepanel\.server(\.[\w-]{1,40})?$/.test(l) ? l : '';
 }
 
+/** The systemd user unit that runs this server (scripts/services.sh: claude-panel-server.service), from
+ * the text of /proc/self/cgroup: the last part of the cgroup path (v2 "0::", or v1 "name=systemd"). */
+export function systemdUnit(cgroup: string): string {
+  for (const line of cgroup.split('\n')) {
+    const m = /^\d+:(?:name=systemd)?:(.*)$/.exec(line);
+    const last = m?.[1]?.split('/').pop() ?? '';
+    if (/^claude-panel-server(\.[\w-]{1,40})?\.service$/.test(last)) return last;
+  }
+  return '';
+}
+
+/** How scripts/self-update.sh restarts this server: a launchd label (macOS), a systemd unit name
+ * (Linux, ends in ".service"), or '' (stop and start the process). */
+export function serviceLabel(env: NodeJS.ProcessEnv, platform: string = process.platform, cgroup?: string): string {
+  if (platform === 'darwin') return launchdLabel(env);
+  if (platform !== 'linux') return '';
+  let text = cgroup;
+  if (text === undefined) {
+    try {
+      text = fs.readFileSync('/proc/self/cgroup', 'utf8');
+    } catch {
+      text = '';
+    }
+  }
+  return systemdUnit(text);
+}
+
 /** Starts scripts/self-update.sh detached (own session and process group: launchd's restart of the
- * server job does not stop it). It never blocks the server. */
+ * server job does not stop it; on Linux it stays in the server unit's cgroup, and the unit's
+ * KillMode=process stops only the server on `systemctl --user restart`). It never blocks the server. */
 export function startInstall(o: {
   root: string;
   bundle: string;

@@ -12,6 +12,8 @@ import path from 'node:path';
 
 import { instance } from '../lib/instance.ts';
 import * as T from '../lib/thoth_setup.ts';
+import { isWsl } from '../lib/wsl.ts';
+import { TIMEOUT_MS } from '../lib/wsl_host.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const home = instance().home;
@@ -23,6 +25,15 @@ function which(cmd: string): string | null {
   } catch {
     const local = path.join(os.homedir(), '.local', 'bin', cmd);
     return cmd === 'claude' && fs.existsSync(local) ? local : null;
+  }
+}
+
+/** A command's output, or null when it fails or runs longer than TIMEOUT_MS (the WSL checks). */
+function run(cmd: string, args: string[]): string | null {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', timeout: TIMEOUT_MS, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return null;
   }
 }
 
@@ -71,6 +82,8 @@ async function main(argv: string[]): Promise<number> {
       nodeVersion: process.version,
       which,
       claudeLoggedIn,
+      wsl: isWsl(),
+      run,
     });
     console.log(JSON.stringify(r, null, 2));
     return r.ok ? 0 : 1;

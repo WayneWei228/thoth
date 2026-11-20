@@ -1,4 +1,6 @@
-// thoth always-on [--undo] [--status]: keep this Mac on as a helper computer (lib/always_on.ts).
+// thoth always-on [--undo] [--status]: keep this computer on as a helper: a Mac (lib/always_on.ts)
+// or Windows, run in WSL (lib/always_on_windows.ts). The hidden --doctor prints the rows that
+// `thoth doctor` (scripts/services.sh) shows, one per line: kind<TAB>title<TAB>fix.
 // Test switches: see AlwaysOn.programs (they count only in the services test mode).
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -6,12 +8,18 @@ import path from 'node:path';
 import * as AlwaysOn from '../lib/always_on.ts';
 import type { Runner } from '../lib/always_on.ts';
 import { instance } from '../lib/instance.ts';
+import { isWsl } from '../lib/wsl.ts';
 
 const USAGE = `thoth always-on [--undo] [--status]
-  (no option)  run the Thoth server and brain as login services that restart by themselves, and keep
-               this Mac on in every case: no sleep on AC power or on battery, also with the lid closed
+  (no option)  keep this helper on (a Mac, or Windows when run in WSL). Mac: run the Thoth server
+               and brain as login services that restart by themselves, and keep this Mac on in
+               every case: no sleep on AC power or on battery, also with the lid closed
                (pmset sleep 0, disablesleep 1); start again after a power failure where the Mac can.
                The display may still turn off.
+               On Windows (run it in WSL): no sleep or hibernate on AC power or on battery, closing
+               the lid does nothing (powercfg); the task ThothWSL starts WSL at boot, and
+               vmIdleTimeout=-1 in %USERPROFILE%\\.wslconfig. Steps that need administrator rights
+               are printed as PowerShell commands to run as administrator.
   --undo       put the power settings back as they were; remove the services if this command added them
   --status     show each setting now
   --lid        old option, accepted for old scripts; it changes nothing (the lid is always included)`;
@@ -37,12 +45,15 @@ if (cmd.action === 'help') {
   process.exit(0);
 }
 
+const distro = process.env['WSL_DISTRO_NAME'] ?? '';
 const deps: AlwaysOn.Deps = {
   run,
   stateDir: instance().home,
   services: path.join(import.meta.dirname, 'services.sh'),
   platform: process.platform,
   tty: AlwaysOn.hasTerminal(process.stdin),
+  wsl: isWsl(),
+  ...(distro === '' ? {} : { distro }),
   ...AlwaysOn.programs(process.env),
   log: (line) => {
     console.log(line);
@@ -50,7 +61,8 @@ const deps: AlwaysOn.Deps = {
 };
 
 try {
-  if (cmd.action === 'undo') AlwaysOn.undo(deps);
+  if (cmd.action === 'doctor') for (const l of AlwaysOn.doctorLines(deps)) console.log(l);
+  else if (cmd.action === 'undo') AlwaysOn.undo(deps);
   else if (cmd.action === 'status') AlwaysOn.status(deps);
   else AlwaysOn.enable(deps);
 } catch (e) {

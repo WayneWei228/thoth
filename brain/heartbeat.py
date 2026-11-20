@@ -14,6 +14,8 @@ OFFLINE_AFTER = 90           # seconds without a heartbeat: offline
 MAX_PROJECTS = 200
 MAX_BODY = 64 * 1024
 ROLES = ("main", "helper")
+# the system a device reports; windows-wsl = Linux inside WSL on a Windows PC (lib/wsl_host.ts)
+OSES = ("macos", "linux", "windows", "windows-wsl")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS heartbeats (
@@ -71,7 +73,7 @@ def clean(body):
     sessions = _num(b.get("running_sessions"), 0, 10000)
     working = _num(b.get("working_sessions"), 0, 10000)
     cpus = _num(b.get("cpus"), 0, 4096)
-    return {
+    out = {
         "role": b.get("role") if b.get("role") in ROLES else "main",
         "on_ac": _bool(b.get("on_ac")),
         "cpu_load": _num(b.get("cpu_load"), 0, 100000),
@@ -84,6 +86,10 @@ def clean(body):
         "thoth_version": v if isinstance(v := b.get("thoth_version"), str) and _VERSION.match(v) else "",
         "thoth_commit": c if isinstance(c := b.get("thoth_commit"), str) and _COMMIT.match(c) else "",
     }
+    # only a known value: an older sender has no os, and GET /api/devices keeps the device's own then
+    if b.get("os") in OSES:
+        out["os"] = b["os"]
+    return out
 
 
 def store(db, device, hb, now):

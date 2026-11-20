@@ -20,6 +20,7 @@ import path from 'node:path';
 import { hostName, readJson } from './devices.ts';
 import { WHERE as APPROVE_WHERE } from './join_requests.ts';
 import * as Setup from './setup.ts';
+import * as WslHost from './wsl_host.ts';
 
 export type Role = 'main' | 'helper';
 const ROLES: readonly Role[] = ['main', 'helper'];
@@ -418,9 +419,23 @@ export interface DoctorDeps extends Pick<Deps, 'home' | 'agentFile' | 'health'> 
   /** the path of a command, or null */
   which: (cmd: string) => string | null;
   claudeLoggedIn: () => boolean;
+  /** this Linux runs inside WSL on a Windows PC (lib/wsl.ts isWsl) */
+  wsl?: boolean;
+  /** run a command with a short timeout: its output, or null when it fails (only for the WSL checks) */
+  run?: (cmd: string, args: string[]) => string | null;
 }
 interface DoctorCheck {
-  id: 'installed' | 'role' | 'owner' | 'joined' | 'claude' | 'claude_login' | 'brain';
+  id:
+    | 'installed'
+    | 'role'
+    | 'owner'
+    | 'joined'
+    | 'claude'
+    | 'claude_login'
+    | 'brain'
+    | 'wsl_systemd'
+    | 'wsl_interop'
+    | 'windows_build';
   ok: boolean;
   detail: string;
   fix: string;
@@ -430,7 +445,43 @@ export interface DoctorReport {
   role: Role | '';
   device: string;
   hub: string;
+  /** macos, linux, windows, or windows-wsl */
+  os: string;
   checks: DoctorCheck[];
+}
+
+const WSL_SYSTEMD_FIX =
+  'turn on systemd: sudo sh -c \'printf "[boot]\\nsystemd=true\\n" >> /etc/wsl.conf\', then in Windows (PowerShell) run: wsl.exe --shutdown, and open Ubuntu again';
+const WSL_INTEROP_FIX =
+  'turn on Windows interop: in /etc/wsl.conf remove "enabled=false" under [interop] and "appendWindowsPath=false", then in Windows (PowerShell) run: wsl.exe --shutdown, and open Ubuntu again';
+
+/** The WSL checks: systemd (the Thoth services are systemd user units), interop (Thoth reads the
+ * Windows power state through powershell.exe), and a Windows build that runs WSL 2. */
+function wslChecks(run: NonNullable<DoctorDeps['run']>, add: (c: DoctorCheck) => void): void {
+  const systemd = run('systemctl', ['--user', 'show-environment']) !== null;
+  add({
+    id: 'wsl_systemd',
+    ok: systemd,
+    detail: systemd ? 'systemd is on in WSL' : 'systemd is off in WSL (systemctl --user does not answer)',
+    fix: WSL_SYSTEMD_FIX,
+  });
+  const [cmd, args] = WslHost.BUILD_CMD;
+  const out = run(cmd, args);
+  const build = WslHost.buildFrom(out);
+  add({
+    id: 'wsl_interop',
+    ok: out !== null,
+    detail: out === null ? 'powershell.exe does not run from WSL' : 'Windows programs run from WSL',
+    fix: WSL_INTEROP_FIX,
+  });
+  if (out === null) return;
+  // a build that cannot be read (an extra line, a warning) is not a reason to update Windows
+  add({
+    id: 'windows_build',
+    ok: build === null || build >= WslHost.MIN_BUILD,
+    detail: build === null ? 'Windows build could not be read' : `Windows build ${String(build)}`,
+    fix: `WSL 2 needs Windows 10 version 2004 (build ${String(WslHost.MIN_BUILD)}) or newer: run Windows Update`,
+  });
 }
 
 /** Machine-readable checks for `thoth doctor --json` (the setup prompt reads them). */
@@ -506,5 +557,11 @@ export async function doctor(d: DoctorDeps): Promise<DoctorReport> {
       'check the network; the cloud brain must be switched on',
     );
   } else add('brain', false, 'no cloud brain yet', 'thoth setup --role main|helper --hub <cloud brain>');
-  return { ok: checks.every((c) => c.ok), role, device: j.device, hub: j.hub, checks };
+  const wsl = d.wsl === true && d.run !== undefined;
+  if (wsl && d.run)
+    wslChecks(d.run, (c) => {
+      add(c.id, c.ok, c.detail, c.fix);
+    });
+  const os = wsl ? WslHost.WSL_OS : Setup.thisSystem(false);
+  return { ok: checks.every((c) => c.ok), role, device: j.device, hub: j.hub, os, checks };
 }
