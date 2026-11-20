@@ -50,12 +50,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     /// Ask the server whether setup is done. Done (or an old server): the normal window.
     /// Not done: the setup window. No answer yet: the setup window's "Starting…" state after a moment, an error after 30 s.
+    /// Setup was finished on this Mac before (saved when the server says so). Such a launch opens
+    /// the normal window at once, even while the server is still starting (after a restart of the
+    /// Mac it can take many seconds): the window waits for it and shows the last page.
+    static let setupSeenKey = "setupDoneSeen"
+
     private func launchGate(deadline: Date, started: Date) {
+        if UserDefaults.standard.bool(forKey: Self.setupSeenKey) && !gateDone {
+            gateDone = true
+            showMain()
+            // the state folder can be new (moved, wiped): then setup runs again
+            Backend.shared.fetchSetupDone { [weak self] done in
+                if done == false { UserDefaults.standard.set(false, forKey: Self.setupSeenKey); self?.showSetup(.firstRun) }
+            }
+            return
+        }
         Backend.shared.fetchSetupDone { [weak self] done in
             guard let self, !self.gateDone else { return }
             if let done {
                 self.gateDone = true
-                if done { self.showMain() } else { self.showSetup(.firstRun) }
+                if done { UserDefaults.standard.set(true, forKey: Self.setupSeenKey); self.showMain() } else { self.showSetup(.firstRun) }
                 return
             }
             if Date() > deadline {
@@ -74,7 +88,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func showSetup(_ mode: SetupWindowController.Mode) {
-        setup.onFinished = { [weak self] in self?.gateDone = true; self?.showMain() }
+        setup.onFinished = { [weak self] in
+            self?.gateDone = true
+            Backend.shared.fetchSetupDone { done in if done == true { UserDefaults.standard.set(true, forKey: AppDelegate.setupSeenKey) } }
+            self?.showMain()
+        }
         setup.present(mode)
     }
 

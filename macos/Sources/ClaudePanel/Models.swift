@@ -100,6 +100,8 @@ struct StateMessage: Codable {
     let sessions: [Session]
     let routes: [Route]?
     let defaultFolder: String?
+    /// The server is building the saved windows again (after a Mac restart or a tmux crash).
+    let restoring: Bool?
 
     /// One session or request the app cannot read is skipped; it must not drop the whole message.
     /// (2026-11-10: sessions without a name made every state message fail, so the app kept old
@@ -110,6 +112,7 @@ struct StateMessage: Codable {
         sessions = (try c.decode([Lossy<Session>].self, forKey: .sessions)).compactMap(\.value)
         routes = (try c.decodeIfPresent([Lossy<Route>].self, forKey: .routes))?.compactMap(\.value)
         defaultFolder = try c.decodeIfPresent(String.self, forKey: .defaultFolder)
+        restoring = try c.decodeIfPresent(Bool.self, forKey: .restoring)
     }
 }
 

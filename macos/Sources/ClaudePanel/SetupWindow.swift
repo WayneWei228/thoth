@@ -112,6 +112,8 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate, WKNavig
     private func waitForServer(deadline: Date) {
         Backend.shared.fetchSetupDone { [weak self] done in
             guard let self, self.window?.isVisible == true else { return }
+            // first-run window that only waited for a slow server: setup is already done, open the panel
+            if done == true, self.mode == .firstRun, !self.loaded { self.finish(); return }
             if done != nil { self.loadPage(); return }
             if Date() > deadline {
                 self.showError("The server on port \(Backend.shared.port) did not answer after 30 seconds. Copy the diagnostics and send them to whoever helps you with Thoth.")

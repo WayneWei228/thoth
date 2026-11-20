@@ -7,7 +7,7 @@ import AppKit
 /// read the state message it showed nothing at all (2026-11-10: two requests looked swallowed).
 final class RouteWatcher {
     static let shared = RouteWatcher()
-    private struct Request { let text: String; let files: [String] }
+    private struct Request { let text: String; let files: [String]; var retry: (() -> Void)? = nil }
     private var mine: [String: Request] = [:]
     private var started = false
 
@@ -32,6 +32,35 @@ final class RouteWatcher {
         }
     }
 
+    /// Send a Claude Code command to the session the user chose (`target`; nil = a new session in
+    /// the default folder) and follow it. It does not go through the router (server.ts `command`).
+    func sendCommand(_ text: String, _ files: [String], target: String?, name: String) {
+        let again: () -> Void = { [weak self] in self?.sendCommand(text, files, target: target, name: name) }
+        var body: [String: Any] = ["text": text, "attachments": files]
+        if let target { body["target"] = target }
+        Backend.shared.send("command", body, fail: { [weak self] error in
+            self?.failed(text: text, files: files, error: error, retry: again)
+        }) { [weak self] r in
+            guard let rid = r["routeId"] as? String else {
+                self?.failed(text: text, files: files, error: r["error"] as? String ?? "The server did not take the command", retry: again)
+                return
+            }
+            // "New session": the server made it (`id`). Try Again goes to that session while it is
+            // open, so a failed delivery does not make one more session each time.
+            let made = target == nil ? r["id"] as? String : nil
+            let retry: () -> Void = { [weak self] in
+                if let made, let s = Backend.shared.session(made) {
+                    self?.sendCommand(text, files, target: made, name: s.name)
+                } else {
+                    again()
+                }
+            }
+            self?.mine[rid] = Request(text: text, files: files, retry: retry)
+            Toast.show("Sending to \(name)…")
+            self?.check()
+        }
+    }
+
     /// The route ids that are still being followed (Home jumps to the session for these).
     func isMine(_ id: String) -> Bool { mine[id] != nil }
     func done(_ id: String) { mine[id] = nil }
@@ -41,7 +70,7 @@ final class RouteWatcher {
             guard let r = Backend.shared.routes.first(where: { $0.id == rid }) else { continue }
             if r.status == "error" {
                 mine[rid] = nil
-                failed(text: req.text, files: req.files, error: r.error ?? "Unknown error")
+                failed(text: req.text, files: req.files, error: r.error ?? "Unknown error", retry: req.retry)
             } else if r.status == "ask" {
                 mine[rid] = nil
                 Toast.show("Which session? Choose on Home.")
@@ -54,7 +83,8 @@ final class RouteWatcher {
         }
     }
 
-    private func failed(text: String, files: [String], error: String) {
+    /// `retry`: what "Try Again" does (a command goes to the same session again); nil = ask the router again.
+    private func failed(text: String, files: [String], error: String, retry: (() -> Void)? = nil) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Your request was not sent"
@@ -68,7 +98,7 @@ final class RouteWatcher {
         alert.window.setAccessibilityIdentifier("route.failed")
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] resp in
             switch resp {
-            case .alertFirstButtonReturn: self?.send(text, files)
+            case .alertFirstButtonReturn: if let retry { retry() } else { self?.send(text, files) }
             case .alertSecondButtonReturn:
                 let w = AppDelegate.shared.window
                 w?.show(.home)

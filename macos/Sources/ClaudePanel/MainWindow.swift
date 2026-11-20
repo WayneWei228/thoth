@@ -49,12 +49,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         sidebar.onSelect = { [weak self] page in self?.show(page) }
         Backend.shared.onChange.append { [weak self] in self?.refresh() }
-        show(.home)
+        let last = LastPage.load()
+        if case .session = last { restorePending = true }
+        show(last)
     }
+    /// After launch on a saved session page: wait for that session to appear (after a Mac restart
+    /// the server builds the windows again one by one). The wait lasts while the server says it is
+    /// restoring, and 8 s more after the first connection (a slow server is not counted).
+    private var restorePending = false
+    private var restoreUntil: Date?
+    private var retryQueued = false
     required init?(coder: NSCoder) { fatalError() }
 
     func show(_ p: Page) {
         page = p
+        LastPage.save(p)
         switch p {
         case .home: content.set(home)
         case .sessions: content.set(sessionsPage)
@@ -74,10 +83,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         case .sessions: sessionsPage.reload()
         case .everywhere: break  // brain data, not panel state
         case .session(let id):
-            if Backend.shared.session(id) == nil && Backend.shared.connected { show(.sessions) } else { detail.reload() }
+            let b = Backend.shared
+            if restorePending && b.connected { restorePending = false; restoreUntil = Date().addingTimeInterval(8) }
+            let waiting = restorePending || b.restoring || (restoreUntil.map { Date() < $0 } ?? false)
+            let here = b.session(id)
+            // tmux restarted: window ids are given out again, so the saved transcript id decides
+            // which window holds the conversation (the same id may now be another conversation)
+            let want = LastPage.savedSid(id)
+            let launching = restorePending || restoreUntil != nil   // until the saved page is confirmed
+            if b.connected, let want, here == nil || (launching && here!.sid != want) {
+                if let s = b.sessions.first(where: { $0.sid == want }) { restoreUntil = nil; show(.session(s.id)); return }
+                if waiting { retryRefresh(); return }
+                restoreUntil = nil
+                if here == nil || !here!.sid.isEmpty { show(.sessions); return }
+            }
+            if here == nil && b.connected {
+                if waiting { retryRefresh() } else { restoreUntil = nil; show(.sessions) }
+            } else {
+                if let here, !launching || want == nil || here.sid == want || !waiting { restoreUntil = nil; LastPage.save(page) }
+                detail.reload()
+            }
         }
         let needs = Backend.shared.sessions.filter { $0.sessionState == .needs }.count
         NSApp.dockTile.badgeLabel = needs > 0 ? "\(needs)" : nil
+    }
+
+    private func retryRefresh() {
+        guard !retryQueued else { return }
+        retryQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.retryQueued = false; self?.refresh() }
     }
 
     func sessionClosed(_ id: String) {
@@ -561,5 +595,45 @@ func navID(_ p: Page) -> String {
     case .sessions: return "nav.sessions"
     case .everywhere: return "nav.everywhere"
     case .session(let id): return "nav.session.\(id)"
+    }
+}
+
+/// The page the window showed last, saved on every change. After a crash or a force quit the app
+/// opens on the same page and the same session. A session is saved with its transcript id too, so
+/// it is found again when tmux restarted and gave it a new window id.
+enum LastPage {
+    private static let key = "lastPage"
+
+    static func save(_ p: Page) {
+        let v: [String: String]
+        switch p {
+        case .home: v = ["page": "home"]
+        case .sessions: v = ["page": "sessions"]
+        case .everywhere: v = ["page": "everywhere"]
+        case .session(let id):
+            let known = Backend.shared.session(id)?.sid ?? ""
+            v = ["page": "session", "id": id, "sid": !known.isEmpty ? known : (saved["id"] == id ? saved["sid"] ?? "" : "")]
+        }
+        UserDefaults.standard.set(v, forKey: key)
+    }
+
+    private static var saved: [String: String] { UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:] }
+
+    static func load() -> Page {
+        let v = saved
+        switch v["page"] {
+        case "sessions": return .sessions
+        case "everywhere": return .everywhere
+        case "session": if let id = v["id"], id.hasPrefix("@") { return .session(id) }
+        default: break
+        }
+        return .home
+    }
+
+    /// The transcript id saved with window `id`, if the saved page is that window.
+    static func savedSid(_ id: String) -> String? {
+        let v = saved
+        guard v["id"] == id, let sid = v["sid"], !sid.isEmpty else { return nil }
+        return sid
     }
 }

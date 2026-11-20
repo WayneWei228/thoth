@@ -9,6 +9,8 @@ final class HomeViewController: NSViewController {
     private let needsHeader = label("Needs you", size: 13, weight: .semibold, color: .secondaryLabelColor)
     private let requestsHeader = label("Recent requests", size: 13, weight: .semibold, color: .secondaryLabelColor)
     private var composer: ComposerBox!
+    private let commandList = SuggestionList()
+    private var commandPicker: CommandPicker!
     private var lastRoutesKey = ""
 
     override func loadView() {
@@ -27,7 +29,8 @@ final class HomeViewController: NSViewController {
         composer = ComposerBox(placeholder: "Ask anything…", idPrefix: "home.ask") { [weak self] t, files in self?.ask(t, files) }
         composer.minHeight = 70
         composer.draftKey = "home"
-        let hint = label("Enter to send · Shift+Enter for a new line · paste or drop images", size: 11, color: .tertiaryLabelColor)
+        commandPicker = CommandPicker(composer: composer, list: commandList)
+        let hint = label("Enter to send · Shift+Enter for a new line · / for Claude Code commands · paste or drop images", size: 11, color: .tertiaryLabelColor)
         hint.alignment = .center
 
         for s in [needsStack, requestsStack] {
@@ -41,7 +44,8 @@ final class HomeViewController: NSViewController {
         stack.alignment = .centerX
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
-        [greet, sub, composer, hint].forEach { stack.addArrangedSubview($0) }
+        [greet, sub, composer, commandList, hint].forEach { stack.addArrangedSubview($0) }
+        stack.setCustomSpacing(6, after: composer)
         stack.setCustomSpacing(8, after: greet)
         stack.setCustomSpacing(22, after: sub)
         stack.setCustomSpacing(36, after: hint)
@@ -60,6 +64,7 @@ final class HomeViewController: NSViewController {
             stack.widthAnchor.constraint(lessThanOrEqualToConstant: 760),
             stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -40),
             composer.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            commandList.widthAnchor.constraint(equalTo: stack.widthAnchor),
             greet.widthAnchor.constraint(equalTo: stack.widthAnchor),
             sub.widthAnchor.constraint(equalTo: stack.widthAnchor),
             needsHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),

@@ -10,18 +10,26 @@
 <link rel="stylesheet" href="/style.css">
 <style>
   /* The setup page uses the panel's own tokens and components (style.css): --bg, --panel, --side, --line,
-     --text, --muted, --accent, --red, --amber, --green, .btn, .pill, .spin, input. Nothing here defines a colour.
+     --text, --muted (older names of --paper, --separator, --ink, --soft), --accent, --red, --amber, --green, .btn, .pill, .spin, input. Nothing here defines a colour.
      The two blocks below only serve ?theme=light|dark. They must hold the same values as style.css
      (a test compares them).*/
   :root[data-theme="light"] {
     color-scheme: light;
-    --bg: #f6f6f4; --panel: #ffffff; --side: #efeeea; --line: #e2e0da; --text: #1f1e1c; --muted: #77746d;
-    --red-bg: #fdecec; --amber-bg: #fdf4e1; --term: #1b1b1a; --shadow: 0 1px 3px rgba(0,0,0,.08), 0 8px 24px rgba(0,0,0,.06);
+    --paper: #ececec; --panel: #ffffff; --side: #e4e4e4; --ink: rgba(0,0,0,.85); --soft: rgba(0,0,0,.5);
+    --tertiary: rgba(0,0,0,.26); --quaternary: rgba(0,0,0,.1); --separator: rgba(0,0,0,.1); --sel: rgba(0,0,0,.08);
+    --red: #ff3b30; --amber: #ff9500; --green: #28cd41;
+    --btn: #ffffff; --btn-line: rgba(0,0,0,.15); --scrim: rgba(0,0,0,.3);
+    --pop: 0 0 0 .5px rgba(0,0,0,.12), 0 10px 30px rgba(0,0,0,.18);
+    --shadow: 0 .5px 1px rgba(0,0,0,.12);
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --bg: #1c1c1b; --panel: #252524; --side: #20201f; --line: #353533; --text: #ecebe8; --muted: #9b9890;
-    --red-bg: #3a2222; --amber-bg: #3a3020; --term: #161615; --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+    --paper: #323232; --panel: #1e1e1e; --side: #2a2a2a; --ink: rgba(255,255,255,.85); --soft: rgba(255,255,255,.55);
+    --tertiary: rgba(255,255,255,.25); --quaternary: rgba(255,255,255,.1); --separator: rgba(255,255,255,.1); --sel: rgba(255,255,255,.1);
+    --red: #ff453a; --amber: #ff9f0a; --green: #32d74b;
+    --btn: #5b5b5b; --btn-line: rgba(255,255,255,.08); --scrim: rgba(0,0,0,.5);
+    --pop: 0 0 0 .5px rgba(255,255,255,.12), 0 10px 30px rgba(0,0,0,.5);
+    --shadow: 0 .5px 1px rgba(0,0,0,.4);
   }
   :root { --mono: "SF Mono", Menlo, ui-monospace, Consolas, monospace; --green-bg: rgba(47,158,91,.14);
     --red-line: rgba(217,63,63,.35); --amber-line: rgba(201,138,18,.4); --green-line: rgba(47,158,91,.35); }

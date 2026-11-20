@@ -212,13 +212,20 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
 
     var current: Session? { Backend.shared.session(sessionId) }
 
+    /// Drafts follow the conversation (transcript id), not the tmux window id: after tmux restarts,
+    /// window ids are new and could point at another session's draft.
+    private static func draftKey(_ id: String) -> String {
+        if let s = Backend.shared.session(id), !s.sid.isEmpty { return "sid.\(s.sid)" }
+        return id
+    }
+
     func load(_ id: String) {
         _ = view
         if sessionId != id { choiceKey = "" }
         sessionId = id
         attachTerminal()
         TerminalHost.shared.show(id)
-        composer.draftKey = id
+        composer.draftKey = Self.draftKey(id)
         if chatWin != id {
             chatWin = id
             let u = Backend.shared.base.appendingPathComponent("chat.html")
@@ -271,6 +278,7 @@ final class SessionDetailViewController: NSViewController, NSTextFieldDelegate {
 
     func reload() {
         guard isViewLoaded, let s = current else { return }
+        if let id = sessionId { composer.moveDraft(to: Self.draftKey(id)) }
         dot.state = s.sessionState
         if !nameField.isEditable { nameField.stringValue = s.name }
         pill.set(s.sessionState)
@@ -388,6 +396,19 @@ final class ChatBridge: NSObject, WKScriptMessageHandler {
             if u.path.hasPrefix(Attachments.dir.standardizedFileURL.path + "/"), FileManager.default.fileExists(atPath: u.path) {
                 NSWorkspace.shared.open(u)
             } else { Toast.show("Only attached files can be opened here") }
+        case "openSent":
+            // a file Claude sent with SendUserFile: the server checks that this session sent it and the
+            // file rules (/api/file check=1) and gives back the real path and whether it may be opened.
+            // A type that can run code (HTML, SVG, scripts, Office) is shown in Finder, not opened.
+            guard let win = body["win"] as? String, let p = body["path"] as? String else { return }
+            struct Checked: Decodable { let path: String; let open: Bool }
+            Backend.shared.get("api/file", query: ["win": win, "path": p, "check": "1"], as: Checked.self) { r in
+                guard let r else { Toast.show("Could not open the file"); return }
+                let u = URL(fileURLWithPath: r.path)
+                let v = try? u.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey])
+                guard v?.isRegularFile == true, v?.isPackage != true else { Toast.show("Could not open the file"); return }
+                if r.open { NSWorkspace.shared.open(u) } else { NSWorkspace.shared.activateFileViewerSelecting([u]) }
+            }
         case "saveImage":
             guard let src = body["src"] as? String else { return }
             ChatBridge.saveImage(src: src, name: body["name"] as? String)

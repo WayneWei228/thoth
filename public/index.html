@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Thoth</title>
+<script src="/look.js"></script>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/xterm.css">
 <link rel="stylesheet" href="/style.css">
@@ -12,111 +14,294 @@
 <div id="app">
   <aside id="sidebar">
     <div class="side-head">
-      <div class="brand"><img class="logo" src="/logo.svg" alt=""> Thoth</div>
-      <button id="btn-new" class="btn primary" title="Start or resume a session">+ New</button>
+      <div class="brand"><img class="mark" src="/logo.svg" alt=""><span>Thoth</span></div>
+      <button id="btn-new" class="icon-btn" title="New session in a folder (⇧⌘N)" aria-label="New session in a folder" data-testid="sidebar.newSession">
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M10 4v12M4 10h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
     </div>
-    <form id="ask" class="ask">
-      <textarea id="ask-text" rows="2" placeholder="Ask anything. I will send it to the right session…"></textarea>
-      <div class="ask-row"><span class="ask-hint">Enter to send · Shift+Enter new line</span><button class="btn primary small" type="submit">Ask</button></div>
-    </form>
-    <div id="attention" class="attention hidden"></div>
-    <div class="side-tools">
-      <input id="filter" type="search" placeholder="Filter sessions…">
-      <button id="btn-overview" class="btn ghost small" title="Show all sessions">Overview</button>
-    </div>
-    <div id="list"></div>
-    <div class="side-foot">
-      <label class="toggle"><input type="checkbox" id="opt-notify"> Notify me</label>
-      <label class="toggle"><input type="checkbox" id="opt-sound"> Sound</label>
-      <span id="conn" class="conn">●</span>
-    </div>
+    <nav id="list" class="side-list" aria-label="Pages and sessions">
+      <div class="nav-rows">
+        <button class="nav" data-page="home" data-testid="nav.home" title="New Request (⌘N, ⌘0)">
+          <svg class="ic orig" viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 3.5H5a2 2 0 0 0-2 2V15a2 2 0 0 0 2 2h9.5a2 2 0 0 0 2-2v-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M15.2 2.6l2.2 2.2-7.6 7.6-3 .8.8-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          <svg class="ic web" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3" width="15" height="14" rx="3.5" class="f-panel s-ink"/><path d="M6 7.5h6" class="s-ink" stroke-width="1.4"/><rect x="6" y="11" width="8" height="3" rx="1.5" class="f-you"/></svg>
+          <span>New Request</span>
+        </button>
+        <button class="nav" data-page="sessions" data-testid="nav.sessions" title="All Sessions (⌘L)">
+          <svg class="ic orig" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="2.5" width="6" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="11.5" y="2.5" width="6" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="2.5" y="11.5" width="6" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="11.5" y="11.5" width="6" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          <svg class="ic web" viewBox="0 0 20 20" aria-hidden="true"><circle cx="4.5" cy="4.5" r="2.2" class="f-red s-ink" stroke-width="1.1"/><path d="M9.5 4.5H17" class="s-ink"/><circle cx="4.5" cy="10" r="2.2" class="f-amber s-ink" stroke-width="1.1"/><path d="M9.5 10H17" class="s-ink"/><circle cx="4.5" cy="15.5" r="2.2" class="f-green s-ink" stroke-width="1.1"/><path d="M9.5 15.5H17" class="s-ink"/></svg>
+          <span>All Sessions</span>
+        </button>
+        <button class="nav" data-page="devices" data-testid="nav.everywhere" title="All Devices (⌘E)">
+          <svg class="ic orig" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 13.5v3M6.5 16.8h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <svg class="ic web" viewBox="0 0 20 20" aria-hidden="true"><rect x="1.5" y="3" width="13.5" height="10" rx="2.5" class="f-panel s-ink"/><path d="M8.2 13v3.5M5 16.8h6.4" class="s-ink"/><circle cx="5.2" cy="6.6" r="1.5" class="f-green"/><rect x="12.5" y="7.5" width="6" height="10.5" rx="2" class="f-panel s-ink"/><circle cx="15.5" cy="10.5" r="1.3" class="f-amber"/></svg>
+          <span>All Devices</span>
+        </button>
+      </div>
+      <div id="rows"></div>
+    </nav>
+    <div id="conn" class="conn hidden" role="status">Disconnected, retrying…</div>
+    <button id="btn-settings" class="side-settings" data-testid="sidebar.settings" title="Settings (⌘,)">
+      <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10 2.2v2.2M10 15.6v2.2M2.2 10h2.2M15.6 10h2.2M4.5 4.5l1.6 1.6M13.9 13.9l1.6 1.6M4.5 15.5l1.6-1.6M13.9 6.1l1.6-1.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span>Settings</span>
+    </button>
+    <div id="side-grip" class="side-grip" title="Drag to resize" aria-hidden="true"></div>
   </aside>
+  <div id="scrim" class="scrim hidden"></div>
 
   <main id="main">
-    <section id="overview" class="overview">
-      <div id="requests-wrap" class="hidden">
-        <h1>Requests</h1>
-        <p class="hint">What you asked from the box on the left, and where it went.</p>
-        <div id="requests" class="requests"></div>
-      </div>
-      <h1>All sessions</h1>
-      <p class="hint">Click a card to open it. Red cards are waiting for you.</p>
-      <div id="grid" class="grid"></div>
-      <div id="empty" class="empty hidden">
-        <p>No sessions yet.</p>
-        <button class="btn primary" id="btn-first-session">+ Start your first session</button>
+    <button id="btn-sidebar" class="icon-btn side-toggle" title="Show sidebar (⌃⌘S)" aria-label="Show sidebar">
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7.5 3.5v13" stroke="currentColor" stroke-width="1.5"/></svg>
+    </button>
+
+    <!-- Home (New Request): HomeViewController.swift. The Ask box, Needs you, Recent requests -->
+    <section id="page-home" class="page home hidden" data-page="home">
+      <div class="home-col">
+        <h1 class="home-title">What should Claude work on?</h1>
+        <p class="home-sub">Ask once. It goes to the right session, or a new one in the right folder.</p>
+        <form id="ask" class="composer-box" data-testid="home.ask">
+          <div id="ask-chips" class="chips hidden"></div>
+          <textarea id="ask-text" rows="1" placeholder="Ask anything…" data-testid="home.ask.input" aria-label="Ask anything"></textarea>
+          <button id="ask-attach" type="button" class="attach-btn" title="Attach images or files (or paste / drop them here)" aria-label="Attach files" data-testid="home.ask.attach">
+            <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M15.5 9.2l-5.6 5.6a3.6 3.6 0 0 1-5.1-5.1l6-6a2.4 2.4 0 0 1 3.4 3.4l-6 6a1.2 1.2 0 0 1-1.7-1.7l5.5-5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button type="submit" class="send-btn" title="Send (Enter)" aria-label="Send" data-testid="home.ask.send">
+            <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M10 16V4.5M5 9.5l5-5 5 5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <input id="ask-file" type="file" multiple hidden accept=".png,.jpg,.jpeg,.gif,.webp,.heic,.pdf,.txt,.md,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.log,.ipynb,.py,.js,.ts,.swift,.java,.go,.rs,.c,.cpp,.h,.rb,.sh,.sql">
+        </form>
+        <p class="home-hint">Enter to send · Shift+Enter for a new line · paste or drop images</p>
+        <div id="needs-wrap" class="home-group hidden">
+          <h2 class="home-h">Needs you</h2>
+          <div id="needs" class="home-list"></div>
+        </div>
+        <div id="requests-wrap" class="home-group hidden">
+          <h2 class="home-h">Recent requests</h2>
+          <div id="requests" class="home-list"></div>
+        </div>
       </div>
     </section>
 
-    <section id="detail" class="detail hidden">
-      <header class="detail-head">
-        <div class="title-wrap">
-          <span id="d-dot" class="dot"></span>
-          <h2 id="d-name" title="Double-click to rename"></h2>
-          <span id="d-agent" class="pill agent hidden">Codex</span>
-          <button id="d-edit" class="edit show" title="Rename this session">✎</button>
-          <span id="d-state" class="pill"></span>
-          <span id="d-title" class="d-title"></span>
+    <!-- All Sessions: SessionsViewController.swift. Sessions grouped by project folder -->
+    <section id="page-sessions" class="page sessions hidden" data-page="sessions">
+      <div class="page-head">
+        <div class="ph-text">
+          <h1 class="page-title">All Sessions</h1>
+          <p class="page-sub">Grouped by project folder. Click a card to open it.</p>
         </div>
-        <div class="meta">
-          <span id="d-folder" class="folder"></span>
-          <span id="d-branch" class="branch"></span>
+        <div class="ph-tools">
+          <input id="filter" type="search" placeholder="Filter" aria-label="Filter sessions" data-testid="sessions.filter">
+          <button id="s-new" class="btn primary" type="button" data-testid="sessions.new">
+            <svg viewBox="0 0 20 20" width="13" height="13" aria-hidden="true"><path d="M10 4v12M4 10h12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>New Session</button>
+        </div>
+      </div>
+      <div id="sections" class="fsecs"></div>
+      <p id="s-empty" class="s-empty hidden"></p>
+    </section>
+
+    <!-- All Devices: EverywhereViewController.swift -->
+    <section id="page-devices" class="page devices hidden" data-page="devices">
+      <h1 class="page-title" data-testid="everywhere.title">All Devices</h1>
+      <p class="page-sub">Every Claude Code and Codex session on every device, from your brain. Add a computer here, or remove one.</p>
+      <div class="dev-row">
+        <div id="dev-chips" class="dev-chips"></div>
+        <div class="dev-btns">
+          <button id="dev-add" class="btn primary" type="button" title="Connect another computer to your brain" data-testid="everywhere.addDevice">
+            <svg viewBox="0 0 20 20" width="13" height="13" aria-hidden="true"><path d="M10 4v12M4 10h12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>Add Computer</button>
+          <button id="dev-sync" class="btn" type="button" data-testid="everywhere.sync">
+            <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M15.5 8A6 6 0 0 0 4.6 6.3M4.5 12a6 6 0 0 0 10.9 1.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M4 3v3.6h3.6M16 17v-3.6h-3.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Sync Now</button>
+        </div>
+      </div>
+      <p id="dev-silent" class="dev-silent hidden" data-testid="everywhere.silent"></p>
+      <div class="dev-search">
+        <input id="dev-q" type="search" placeholder="Search all sessions (title, request, reply, folder)" aria-label="Search all sessions" data-testid="everywhere.search">
+        <select id="dev-pick" class="recent-pop dev-pick" aria-label="Device" data-testid="everywhere.device"><option value="">All devices</option></select>
+        <div id="dev-agent" class="mode-seg" role="radiogroup" aria-label="Agent" data-testid="everywhere.agent">
+          <button type="button" data-agent="" class="on">All</button><button type="button" data-agent="claude">Claude</button><button type="button" data-agent="codex">Codex</button>
+        </div>
+      </div>
+      <p id="dev-status" class="dev-status" data-testid="everywhere.status"></p>
+      <div id="dev-results" class="dev-results"></div>
+    </section>
+
+    <!-- Session: SessionDetailViewController.swift -->
+    <section id="detail" class="detail hidden" data-page="session">
+      <header class="detail-head">
+        <div class="dh-left">
+          <div class="title-wrap">
+            <span id="d-dot" class="dot"></span>
+            <h2 id="d-name" title="Double-click to rename" data-testid="detail.name"></h2>
+            <input id="d-name-edit" class="name-edit hidden" maxlength="30" autocomplete="off" spellcheck="false" aria-label="Session name">
+            <button id="d-edit" class="icon-btn d-edit" type="button" title="Rename" aria-label="Rename" data-testid="detail.rename">
+              <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><path d="M13.6 3.4l3 3-9.3 9.3-3.9.9.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M11.8 5.2l3 3" stroke="currentColor" stroke-width="1.6"/></svg>
+            </button>
+            <span class="d-pills"><span id="d-state" class="pill" data-testid="detail.state"></span><span id="d-agent" class="pill agent hidden" title="Runs the Codex CLI">Codex</span></span>
+            <span id="d-title" class="d-title"></span>
+          </div>
+          <div id="d-path" class="d-path"></div>
         </div>
         <div class="actions">
-          <button id="a-start" class="btn primary">▶ Resume</button>
-          <button id="a-stop" class="btn warn" title="Interrupt Claude (Esc)">■ Stop</button>
-          <button id="a-finder" class="btn ghost" title="Open folder in Finder">Finder</button>
-          <button id="a-code" class="btn ghost" title="Open folder in VS Code">VS Code</button>
-          <button id="a-close" class="btn ghost danger" title="End this session">✕ Close</button>
+          <div id="d-mode" class="mode-seg" role="radiogroup" aria-label="View" data-testid="detail.mode">
+            <button type="button" data-mode="chat" title="Chat view or the raw terminal">Chat</button><button type="button" data-mode="terminal">Terminal</button>
+          </div>
+          <button id="a-start" class="btn primary" type="button" data-testid="detail.resume">
+            <svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true"><path d="M5.5 3.5v13l11-6.5z" fill="currentColor"/></svg><span>Resume</span></button>
+          <button id="a-stop" class="btn" type="button" data-testid="detail.stop">
+            <svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true"><rect x="4" y="4" width="12" height="12" rx="2" fill="currentColor"/></svg>Stop</button>
+          <button id="a-finder" class="btn icon" type="button" title="Show in Finder" aria-label="Show in Finder" data-testid="detail.finder">
+            <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.6 1.8H16a1.5 1.5 0 0 1 1.5 1.5v7.2a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></button>
+          <button id="a-code" class="btn" type="button" data-testid="detail.code">
+            <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M7 6l-4 4 4 4M13 6l4 4-4 4M11.2 4.5l-2.4 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>VS Code</button>
+          <button id="a-close" class="btn icon" type="button" title="Close session" aria-label="Close session" data-testid="detail.close">
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="7.3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7.4 7.4l5.2 5.2M12.6 7.4l-5.2 5.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
         </div>
       </header>
 
-      <div id="choice" class="choice hidden">
-        <div class="choice-q"><span class="bell">!</span> <span id="choice-q"></span></div>
-        <div id="choice-opts" class="choice-opts"></div>
+      <div id="notice" class="notice hidden" data-testid="detail.notice"></div>
+
+      <div id="term-wrap"><iframe id="chat" class="hidden" title="Chat" data-testid="detail.chat"></iframe><div id="term"></div></div>
+
+      <div id="choice" class="choice hidden" data-testid="detail.choiceBar">
+        <svg class="bell" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="9" fill="currentColor"/><path d="M10 5.2v6" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/><circle cx="10" cy="14.6" r="1.3" fill="#fff"/></svg>
+        <div class="choice-body">
+          <div id="choice-q" class="choice-q"></div>
+          <div id="choice-opts" class="choice-opts"></div>
+        </div>
       </div>
 
-      <div id="notice" class="notice hidden"></div>
-
-      <div id="term-wrap"><div id="term"></div></div>
-
-      <form id="composer" class="composer">
-        <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for new line)"></textarea>
-        <button class="btn primary" type="submit">Send</button>
+      <form id="composer" class="composer-box detail-composer hidden" data-testid="detail.composer">
+        <div id="msg-chips" class="chips hidden"></div>
+        <textarea id="msg" rows="1" placeholder="Message Claude…  (paste or drop images and files)" aria-label="Message" data-testid="detail.composer.input"></textarea>
+        <button id="msg-attach" type="button" class="attach-btn" title="Attach images or files (or paste / drop them here)" aria-label="Attach files" data-testid="detail.composer.attach">
+          <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><path d="M15.5 9.2l-5.6 5.6a3.6 3.6 0 0 1-5.1-5.1l6-6a2.4 2.4 0 0 1 3.4 3.4l-6 6a1.2 1.2 0 0 1-1.7-1.7l5.5-5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button type="submit" class="send-btn" title="Send (Enter)" aria-label="Send" data-testid="detail.composer.send">
+          <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M10 16V4.5M5 9.5l5-5 5 5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <input id="msg-file" type="file" multiple hidden accept=".png,.jpg,.jpeg,.gif,.webp,.heic,.pdf,.txt,.md,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.log,.ipynb,.py,.js,.ts,.swift,.java,.go,.rs,.c,.cpp,.h,.rb,.sh,.sql">
       </form>
     </section>
   </main>
 </div>
 
-<div id="modal" class="modal hidden">
-  <div class="modal-card">
-    <header><h3>New session</h3><button class="x" id="modal-close">✕</button></header>
-    <div class="step">
-      <div class="label">1. Project folder</div>
-      <div class="folder-row">
-        <input id="m-folder" placeholder="/path/to/project">
-        <button id="m-browse" class="btn">Choose…</button>
-      </div>
-      <div id="m-recent" class="recent"></div>
+<!-- New Session: NewSessionController.swift -->
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="m-title" data-testid="newSession">
+  <div class="modal-card new-card">
+    <h3 id="m-title">New Session</h3>
+    <div class="label first">1. Project folder</div>
+    <div class="folder-row">
+      <input id="m-folder" placeholder="/path/to/project" autocomplete="off" spellcheck="false">
+      <button id="m-browse" class="btn" type="button">
+        <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.6 1.8H16a1.5 1.5 0 0 1 1.5 1.5v7.2a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>Choose…</button>
     </div>
-    <div class="step">
-      <div class="label">2. Start</div>
-      <div class="start-row">
-        <div id="m-agent" class="seg" role="radiogroup" aria-label="Agent">
-          <button type="button" data-agent="claude" role="radio">Claude Code</button>
-          <button type="button" data-agent="codex" role="radio">Codex</button>
-        </div>
-        <button id="m-fresh" class="btn primary">Start new conversation</button>
-        <span class="or">or continue a previous one:</span>
+    <select id="m-recent" class="recent-pop" aria-label="Recent folders"><option value="">Recent folders…</option></select>
+    <div class="label">2. Start</div>
+    <div class="start-row">
+      <div id="m-agent" class="seg" role="radiogroup" aria-label="Agent">
+        <button type="button" data-agent="claude" role="radio">Claude Code</button>
+        <button type="button" data-agent="codex" role="radio">Codex</button>
       </div>
-      <div id="m-agent-note" class="agent-note hidden"></div>
-      <div id="m-history" class="history"><div class="muted">Choose a folder first.</div></div>
+      <button id="m-fresh" class="btn primary" type="button" data-testid="newSession.fresh">
+        <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M10 3c4.1 0 7.5 2.7 7.5 6.1s-3.4 6.1-7.5 6.1c-.8 0-1.6-.1-2.3-.3L4 16.6l.9-3.2C3.4 12.3 2.5 10.8 2.5 9.1 2.5 5.7 5.9 3 10 3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 6.6v5M7.5 9.1h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Start New Conversation</button>
+      <span id="m-agent-note" class="agent-note hidden"></span>
+    </div>
+    <div class="or">or double-click a previous conversation to continue it:</div>
+    <div class="history" role="grid" aria-label="Previous conversations">
+      <div class="hist-head" role="row"><span role="columnheader">Conversation</span><span role="columnheader">Last used</span></div>
+      <div id="m-history" class="hist-body"><div class="hist-empty">Choose a folder first.</div></div>
+    </div>
+    <div class="dialog-foot">
+      <button type="button" class="btn" id="m-cancel">Cancel</button>
+      <button type="button" class="btn" id="m-continue" data-testid="newSession.continue">Continue Selected</button>
     </div>
   </div>
 </div>
 
-<div id="menu" class="ctx hidden"></div>
-<div id="toast" class="toast hidden"></div>
+<!-- A request that was not sent: RouteWatcher.swift -->
+<div id="route-failed" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="rf-h" data-testid="route.failed">
+  <div class="modal-card rf-card">
+    <h3 id="rf-h">Your request was not sent</h3>
+    <p id="rf-body" class="rf-body"></p>
+    <div class="dialog-foot">
+      <!-- macOS alert order: the first button (Try Again) is on the right -->
+      <button type="button" class="btn" data-close>Close</button>
+      <button type="button" class="btn" id="rf-edit" data-testid="route.failed.edit">Edit</button>
+      <button type="button" class="btn primary" id="rf-retry" data-testid="route.failed.retry">Try Again</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings: the look, as in the Mac app; Notify and Sound are browser only -->
+<div id="settings" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-h">
+  <div class="modal-card settings-card">
+    <header><h3 id="settings-h">Appearance</h3><button class="x" data-close aria-label="Close">✕</button></header>
+    <p class="hint">How Thoth looks. It changes at once; your sessions keep running.</p>
+    <div class="looks">
+      <button class="look-card" data-look="original" data-testid="settings.look.original">
+        <span class="look-t">Original</span><span class="look-d">System colours. Follows light and dark mode.</span>
+      </button>
+      <button class="look-card" data-look="website" data-testid="settings.look.website">
+        <span class="look-t">Website</span><span class="look-d">Ink on paper, like the Thoth website. Light only.</span>
+      </button>
+    </div>
+    <h4 class="sec-h">This browser</h4>
+    <label class="toggle"><input type="checkbox" id="opt-notify"> Notify me when a session needs me or is done (only when this page is in the background)</label>
+    <label class="toggle"><input type="checkbox" id="opt-sound"> Sound</label>
+  </div>
+</div>
+
+<!-- Rename Session, as in the Mac app -->
+<div id="rename" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="rename-h">
+  <form class="modal-card rename-card">
+    <h3 id="rename-h">Rename Session</h3>
+    <input id="rename-input" maxlength="30" autocomplete="off">
+    <div class="dialog-foot"><button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn primary">Rename</button></div>
+  </form>
+</div>
+
+<!-- An alert (NSAlert): title, text, buttons. The first button is the default, on the right -->
+<div id="alert" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="al-h" data-testid="alert">
+  <div class="modal-card alert-card">
+    <h3 id="al-h"></h3>
+    <p id="al-body" class="al-body"></p>
+    <div id="al-btns" class="dialog-foot"></div>
+  </div>
+</div>
+
+<!-- Add a Computer / Reconnect: AddDeviceController.swift -->
+<div id="add-device" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ad-h" data-testid="addDevice">
+  <div class="modal-card ad-card">
+    <h3 id="ad-h">Add a Computer</h3>
+    <p id="ad-sub" class="ad-sub"></p>
+    <div id="ad-step1" class="label">1. Name the computer</div>
+    <div class="ad-name-row">
+      <input id="ad-name" placeholder="for example: office-pc" autocomplete="off" spellcheck="false" data-testid="addDevice.name">
+      <select id="ad-os" class="recent-pop ad-os" aria-label="System" data-testid="addDevice.os"><option value="macos">macOS</option><option value="linux">Linux</option><option value="windows">Windows</option></select>
+      <button id="ad-create" class="btn primary" type="button" data-testid="addDevice.create">
+        <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M6 8l2.5 2L6 12M10.5 12.5H14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Create Command</span></button>
+    </div>
+    <p id="ad-msg" class="ad-msg" data-testid="addDevice.message"></p>
+    <div id="ad-step2" class="hidden">
+      <div class="label">2. Run this command on that computer</div>
+      <p id="ad-where" class="ad-where"></p>
+      <pre id="ad-cmd" class="ad-cmd" data-testid="addDevice.command"></pre>
+      <div class="ad-copy-row">
+        <button id="ad-copy" class="btn" type="button" data-testid="addDevice.copy">
+          <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><rect x="6.5" y="6.5" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M13.5 6.5V5a1.5 1.5 0 0 0-1.5-1.5H5A1.5 1.5 0 0 0 3.5 5v7A1.5 1.5 0 0 0 5 13.5h1.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Copy Command</span></button>
+        <span id="ad-note" class="ad-note" data-testid="addDevice.note"></span>
+      </div>
+    </div>
+    <p id="ad-fw" class="ad-fw hidden" data-testid="addDevice.firewall"></p>
+    <button id="ad-allow" class="btn small hidden" type="button" data-testid="addDevice.allow">Allow Other Computers…</button>
+    <div class="ad-foot">
+      <span id="ad-spin" class="spin hidden"></span>
+      <span id="ad-state" class="ad-state" data-testid="addDevice.state"></span>
+      <button id="ad-close" class="btn" type="button" data-testid="addDevice.close">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="menu" class="ctx hidden" role="menu"></div>
+<div id="toast" class="toast hidden" role="status"></div>
 
 <script src="/xterm.js"></script>
 <script src="/addon-fit.js"></script>

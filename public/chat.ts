@@ -38,7 +38,7 @@ interface ToolBlock {
   status: string;
   result?: string;
   images?: ImageRef[];
-  sent?: { caption?: string; images: { path: string }[] };
+  sent?: { caption?: string; images: { path: string }[]; files?: FileRef[] };
 }
 type Block = TextBlock | ThinkingBlock | ToolBlock;
 interface UserItem {
@@ -278,7 +278,9 @@ const FILE_ICON: Record<string, string> = {
   log: '📄',
   ipynb: '📓',
 };
-function fileGroup(files: FileRef[]): HTMLDivElement {
+// sent: files Claude sent with SendUserFile. /api/file checks them against this session's
+// transcript; the attachments-only routes (/api/thumb, openFile) do not serve them.
+function fileGroup(files: FileRef[], { sent = false }: { sent?: boolean } = {}): HTMLDivElement {
   const box = document.createElement('div');
   box.className = 'files';
   for (const f of files) {
@@ -294,7 +296,10 @@ function fileGroup(files: FileRef[]): HTMLDivElement {
       const img = document.createElement('img');
       img.className = 'fpreview';
       img.alt = `Preview of ${shown}`;
-      img.src = `/api/thumb?path=${encodeURIComponent(f.path)}&size=${String(Math.round(220 * (window.devicePixelRatio || 2)))}`;
+      const px = String(Math.round(220 * (window.devicePixelRatio || 2)));
+      img.src = sent
+        ? `/api/file?win=${encodeURIComponent(win)}&path=${encodeURIComponent(f.path)}&thumb=${px}`
+        : `/api/thumb?path=${encodeURIComponent(f.path)}&size=${px}`;
       img.addEventListener('error', () => {
         img.remove();
         b.classList.remove('with-preview');
@@ -306,7 +311,12 @@ function fileGroup(files: FileRef[]): HTMLDivElement {
       b.prepend(img);
     }
     b.addEventListener('click', () => {
-      toNative({ type: 'openFile', path: f.path });
+      if (!sent) {
+        toNative({ type: 'openFile', path: f.path });
+        return;
+      }
+      const q = `win=${encodeURIComponent(win)}&path=${encodeURIComponent(f.path)}`;
+      if (!toNative({ type: 'openSent', win, path: f.path })) window.open(`/api/file?${q}`, '_blank');
     });
     box.append(b);
   }
@@ -480,7 +490,7 @@ function renderItem(it: Item): HTMLElement {
       d.open = true;
     }
     el.append(d);
-    // images Claude sent with SendUserFile are part of the message, not hidden in the tool row
+    // what Claude sent with SendUserFile is part of the message, not hidden in the tool row
     if (b.sent && b.status === 'done') {
       if (b.sent.caption !== undefined && b.sent.caption !== '') {
         const c = document.createElement('p');
@@ -488,14 +498,18 @@ function renderItem(it: Item): HTMLElement {
         c.textContent = b.sent.caption;
         el.append(c);
       }
-      const g = imageGroup(
-        b.sent.images.map((im) => ({
-          path: im.path,
-          src: `/api/sent?win=${encodeURIComponent(win)}&path=${encodeURIComponent(im.path)}`,
-        })),
-      );
-      g.classList.add('sent');
-      el.append(g);
+      if (b.sent.images.length > 0) {
+        const g = imageGroup(
+          b.sent.images.map((im) => ({
+            path: im.path,
+            src: `/api/sent?win=${encodeURIComponent(win)}&path=${encodeURIComponent(im.path)}`,
+          })),
+        );
+        g.classList.add('sent');
+        el.append(g);
+      }
+      // other files (a PDF, a document) as file cards
+      if (b.sent.files && b.sent.files.length > 0) el.append(fileGroup(b.sent.files, { sent: true }));
     }
   }
   if (it.endsTurn === true) el.append(actions(it)); // one bar per turn, not under every step

@@ -62,9 +62,13 @@ enum Attachments {
 final class ComposerTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onImages: (([URL]) -> Void)?
+    /// Sees each key first; true = the key is used (the command list under the Ask box: CommandMenu.swift).
+    var onKey: ((NSEvent) -> Bool)?
     var placeholder = "" { didSet { needsDisplay = true; setAccessibilityPlaceholderValue(placeholder) } }
 
     override func keyDown(with event: NSEvent) {
+        // not while an input method composes text (Chinese): its Enter and arrows belong to it
+        if !hasMarkedText(), onKey?(event) == true { return }
         let isReturn = event.keyCode == 36 || event.keyCode == 76
         if isReturn && !event.modifierFlags.contains(.shift) && !hasMarkedText() {
             onSubmit?()
@@ -195,9 +199,12 @@ final class ComposerBox: NSView {
     var minHeight: CGFloat = 60
     var maxHeight: CGFloat = 220
     private let idPrefix: String
+    /// Asked before a send; true = do not send and keep the text (a command waits for its session).
+    var interceptSend: ((String, [String]) -> Bool)?
+    private var submitAction: (() -> Void)?
     private var dragging = false { didSet { refreshColors() } }
     private var draftWork: DispatchWorkItem?
-    var draftKey: String? { didSet { loadDraft() } }
+    var draftKey: String? { didSet { if !withoutLoad { loadDraft() } } }
 
     init(placeholder: String, fontSize: CGFloat = 15, idPrefix: String, onSend: @escaping (String, [String]) -> Void) {
         self.idPrefix = idPrefix
@@ -267,12 +274,11 @@ final class ComposerBox: NSView {
             guard let self else { return }
             let t = self.text.string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty || !self.attachments.isEmpty else { return }
+            if self.interceptSend?(t, self.attachments.map(\.path)) == true { return }
             onSend(t, self.attachments.map(\.path))
-            self.text.string = ""
-            self.setAttachments([])
-            self.saveDraftNow()
-            self.fit()
+            self.clear()
         }
+        submitAction = submit
         text.onSubmit = submit
         send.handler = submit
         text.onImages = { [weak self] urls in self?.add(urls) }
@@ -288,6 +294,26 @@ final class ComposerBox: NSView {
     // MARK: attachments
 
     func add(_ urls: [URL]) { setAttachments(attachments + urls) }
+
+    /// Send what is in the box (as Enter does).
+    func submit() { submitAction?() }
+
+    /// Empty the box after its text was sent.
+    func clear() {
+        text.string = ""
+        setAttachments([])
+        saveDraftNow()
+        fit()
+    }
+
+    /// Replace the text (a command picked from the list); the cursor goes to the end.
+    func setText(_ t: String) {
+        text.string = t
+        text.setSelectedRange(NSRange(location: (t as NSString).length, length: 0))
+        text.needsDisplay = true
+        saveDraftNow()
+        fit()
+    }
 
     /// Put text and files back in the box (a request that failed), unless the user typed something new.
     func setDraft(_ t: String, files: [URL]) {
@@ -309,6 +335,7 @@ final class ComposerBox: NSView {
         }
         strip.isHidden = urls.isEmpty
         stripHeight.constant = urls.isEmpty ? 0 : 44
+        scheduleDraft()
         window?.makeFirstResponder(text)
     }
 
@@ -348,17 +375,41 @@ final class ComposerBox: NSView {
         draftWork = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: w)
     }
+    // Text and attached files are both kept, so a crash or a force quit loses neither.
     private func saveDraftNow() {
         guard let k = draftKey else { return }
+        let d = UserDefaults.standard
         let t = text.string
-        if t.isEmpty { UserDefaults.standard.removeObject(forKey: "draft.\(k)") } else { UserDefaults.standard.set(t, forKey: "draft.\(k)") }
+        if t.isEmpty { d.removeObject(forKey: "draft.\(k)") } else { d.set(t, forKey: "draft.\(k)") }
+        if attachments.isEmpty { d.removeObject(forKey: "draftFiles.\(k)") } else { d.set(attachments.map(\.path), forKey: "draftFiles.\(k)") }
     }
     private func loadDraft() {
         guard let k = draftKey else { return }
         text.string = UserDefaults.standard.string(forKey: "draft.\(k)") ?? ""
-        setAttachments([])
+        let files = (UserDefaults.standard.stringArray(forKey: "draftFiles.\(k)") ?? [])
+            .filter { FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+        setAttachments(files)
         fit()
     }
+    /// Keep the draft that is in the box under a new key (the session got its transcript id).
+    func moveDraft(to key: String) {
+        guard let old = draftKey, old != key else { return }
+        draftWork?.cancel()
+        // an empty box (opened before the server state came): show the draft saved under the new key
+        if text.string.isEmpty && attachments.isEmpty { draftKey = key; return }
+        // the session already has a saved draft (a restore): it wins over the text shown under the
+        // window id, which may be an old draft of another conversation that had the same id
+        let d = UserDefaults.standard
+        if d.string(forKey: "draft.\(key)") != nil || d.stringArray(forKey: "draftFiles.\(key)") != nil {
+            if old.hasPrefix("@") { d.removeObject(forKey: "draft.\(old)"); d.removeObject(forKey: "draftFiles.\(old)") }
+            draftKey = key; return
+        }
+        UserDefaults.standard.removeObject(forKey: "draft.\(old)")
+        UserDefaults.standard.removeObject(forKey: "draftFiles.\(old)")
+        withoutLoad = true; draftKey = key; withoutLoad = false
+        saveDraftNow()
+    }
+    private var withoutLoad = false
 
     // MARK: layout
 

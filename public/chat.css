@@ -106,7 +106,8 @@ html, body { margin: 0; background: var(--bg); color: var(--text);
 .actions .time { font-size: 11px; color: var(--muted); }
 
 /* file attachments */
-.files { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin: 6px 0; }
+.files { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-start; margin: 6px 0; }
+.user .files { justify-content: flex-end; }
 .file { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--code); color: var(--text); cursor: pointer; font: 13px -apple-system, sans-serif; max-width: 280px; }
 .file:hover { border-color: var(--muted); }
 .ficon { font-size: 20px; }

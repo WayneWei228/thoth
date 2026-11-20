@@ -6,8 +6,9 @@
 //   { id, role: 'user', ts, text, images: [{src}|{path}], files: [{path, name, ext}] }
 //   { id, role: 'assistant', ts, blocks: [ {type:'text', text} | {type:'thinking', text, seconds, key}
 //                                          | {type:'tool', id, name, summary, detail?, status, result, images, sent?} ] }
-//   sent (only on a SendUserFile tool): { caption, images: [{path}] } — the images Claude sent to the user,
-//   absolute paths. The chat view shows them in the message; the server serves only these paths.
+//   sent (only on a SendUserFile tool): { caption, images: [{path}], files: [{path, name, ext}] } — what
+//   Claude sent to the user (images; other files such as a PDF as cards), absolute paths. The chat view
+//   shows them in the message; /api/sent serves only the images, /api/file checks the other files.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -53,6 +54,7 @@ export interface ThinkingBlock {
 export interface SentFiles {
   caption: string;
   images: { path: string }[];
+  files: FileRef[];
 }
 export interface ToolBlock {
   type: 'tool';
@@ -138,17 +140,22 @@ function imageSrc(block: RawBlock | null | undefined): ImageRef | null {
 
 const isImage = (x: ImageRef | null): x is ImageRef => x !== null;
 
-// Images that Claude sent with the SendUserFile tool. Relative paths are relative to the session's folder.
+// Files that Claude sent with the SendUserFile tool: images, and other files (PDF, documents) as file
+// cards. Relative paths are relative to the session's folder.
 function sentFiles(block: RawBlock, cwd: string | undefined): SentFiles | null {
   const input = block.input ?? {};
-  const files = input['files'];
-  if (block.name !== 'SendUserFile' || !Array.isArray(files)) return null;
-  const images = (files as unknown[])
-    .filter((f): f is string => typeof f === 'string' && IMAGE_RE.test(f))
-    .map((f) => ({ path: path.resolve((cwd ?? '') || '/', f) }));
-  if (images.length === 0) return null;
+  const list = input['files'];
+  if (block.name !== 'SendUserFile' || !Array.isArray(list)) return null;
+  const paths = (list as unknown[])
+    .filter((f): f is string => typeof f === 'string' && f.trim() !== '')
+    .map((f) => path.resolve((cwd ?? '') || '/', f));
+  const images = paths.filter((p) => IMAGE_RE.test(p)).map((p) => ({ path: p }));
+  const files = paths
+    .filter((p) => !IMAGE_RE.test(p))
+    .map((p) => ({ path: p, name: path.basename(p), ext: path.extname(p).slice(1).toLowerCase() }));
+  if (images.length === 0 && files.length === 0) return null;
   const caption = input['caption'];
-  return { caption: typeof caption === 'string' ? caption.trim() : '', images };
+  return { caption: typeof caption === 'string' ? caption.trim() : '', images, files };
 }
 
 export function summarizeTool(name: string | undefined, input: Record<string, unknown> = {}): string {
@@ -585,6 +592,22 @@ export class ChatRevisions<T extends { id: string } = ChatItem> {
     if (!this.items || epoch !== this.epoch || !Number.isInteger(seq) || seq < 0 || seq > this.seq) return null;
     return this.items.filter((it) => (this.revs.get(it.id)?.rev ?? 0) > seq);
   }
+}
+
+// true when `file` is any file (image or other) that this transcript's SendUserFile calls sent without
+// an error: the Mac app opens only these (/api/file check=1)
+export function wasSentFile(items: ChatItem[], file: string): boolean {
+  return items.some(
+    (it) =>
+      it.role === 'assistant' &&
+      it.blocks.some(
+        (b) =>
+          b.type === 'tool' &&
+          b.sent !== undefined &&
+          b.status === 'done' &&
+          [...b.sent.images, ...b.sent.files].some((f) => f.path === file),
+      ),
+  );
 }
 
 // true when `file` is an image that this transcript's SendUserFile calls sent without an error

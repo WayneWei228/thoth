@@ -376,6 +376,28 @@ export interface CheckFileOptions extends RuleOptions {
 export type CheckFileResult =
   { fd: number; size: number; real: string; mime: string; mtime: number } | { error: string; code: number };
 
+/** Types the Mac app opens in their default app: they do not run code (HTML, SVG, scripts, Office do). */
+export const OPEN_EXT = new Set([...IMAGE_EXT, 'pdf', 'txt', 'md', 'csv', 'tsv', 'log']);
+
+/**
+ * /api/file check=1 (the Mac app, before it opens a file Claude sent): only a file this session SENT
+ * (`sent`), under the same rules as checkFile. Gives the real path and `open`: the app opens it in its
+ * default app, or else shows it in Finder. Never the content.
+ */
+export function checkOpen(
+  requested: unknown,
+  sent: (p: string) => boolean,
+  named: Set<string>,
+  opts: CheckFileOptions = {},
+): { path: string; open: boolean } | { error: string; code: number } {
+  if (typeof requested !== 'string' || requested.includes('\0') || !sent(path.resolve(requested)))
+    return { error: 'this session did not send the file', code: 403 };
+  const r = checkFile(requested, named, opts);
+  if ('error' in r) return r;
+  fs.closeSync(r.fd);
+  return { path: r.real, open: OPEN_EXT.has(extOf(r.real)) };
+}
+
 /**
  * Checks `requested` against the rules and opens it. Returns { fd, size, real, mime } or { error, code }.
  * The caller closes `fd`. `named`: namedPaths() of this session's transcript.
@@ -604,6 +626,9 @@ function toolExtras(b: BlockIn, cardOpts: RuleOptions, cardCache: Map<string, Fi
   else if (b.name === 'Read') kind = 'read';
   for (const p of toolPaths(b)) {
     if (!cardCache.has(p)) cardCache.set(p, fileCard(p, cardOpts, kind));
+    // a path named earlier (in Claude's text, or read or written) and then sent is a sent file
+    const had = cardCache.get(p);
+    if (kind === 'sent' && had && had.kind !== 'sent') cardCache.set(p, { ...had, kind: 'sent' });
     const c = cardCache.get(p);
     if (c && !(b.name === 'SendUserFile' && c.image && b.sent)) files.push(c);
   }
@@ -681,7 +706,8 @@ export function phoneView(
       };
       if (b.sent)
         t['sent'] = {
-          ...b.sent,
+          // the phone shows the other sent files as file cards (`files` above), not from here
+          caption: b.sent.caption,
           images: b.sent.images.map((im) => withSize({ path: im.path, mime: mimeOf(im.path) })),
         };
       return t;

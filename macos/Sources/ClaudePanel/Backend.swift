@@ -15,6 +15,8 @@ final class Backend {
     /// Where new work goes when no session or folder fits (server setting).
     private(set) var defaultFolder = ""
     private(set) var connected = false
+    /// The server is building the saved windows again; a saved page waits for its session.
+    private(set) var restoring = false
 
     /// Called on the main thread after every state update.
     var onChange: [() -> Void] = []
@@ -162,8 +164,10 @@ final class Backend {
         // ignore updates that only move the activity clock
         let key = state.sessions.map { "\($0.id)|\($0.name)|\($0.state)|\($0.last)|\($0.question)|\($0.options.count)|\($0.title ?? "")|\($0.prompt ?? "")|\($0.branch)" }
             .joined(separator: "\n") + "#" + (state.routes ?? []).map { "\($0.id)|\($0.status)|\($0.target ?? "")" }.joined(separator: ",")
+            + "#\(state.restoring == true)"
         let first = sessions.isEmpty && !state.sessions.isEmpty
         sessions = state.sessions
+        restoring = state.restoring ?? false
         routes = state.routes ?? routes
         if let f = state.defaultFolder { defaultFolder = f }
         if key != lastKey || first {
@@ -207,7 +211,11 @@ final class Backend {
 
     func get<T: Decodable>(_ path: String, query: [String: String] = [:], as: T.Type, done: @escaping (T?) -> Void) {
         var comps = URLComponents(url: base.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
-        if !query.isEmpty { comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
+        if !query.isEmpty {
+            comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+            // URLComponents leaves "+" as is; the server (URLSearchParams) reads it as a space ("C++ notes.pdf")
+            comps.percentEncodedQuery = comps.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        }
         URLSession.shared.dataTask(with: comps.url!) { data, _, _ in
             let v = data.flatMap { try? JSONDecoder().decode(T.self, from: $0) }
             DispatchQueue.main.async { done(v) }

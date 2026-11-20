@@ -16,7 +16,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import * as Attachments from './lib/attachments.ts';
 import * as Brief from './lib/brief.ts';
-import { TranscriptFile, ChatRevisions, wasSent, pendingEchoes } from './lib/chat.ts';
+import * as Commands from './lib/commands.ts';
+import { TranscriptFile, ChatRevisions, wasSent, wasSentFile, pendingEchoes } from './lib/chat.ts';
 import { claudeArgs, stateHooks } from './lib/claude_args.ts';
 import * as Codex from './lib/codex.ts';
 import * as Copies from './lib/copies.ts';
@@ -263,12 +264,30 @@ function startAgent(id: string, sid: string, agent: unknown): Promise<void> {
 // After a restart of the Mac (no tmux session yet): build the windows again and resume the
 // sessions that were running before (lib/restore.ts). Until that is done, poll does not write
 // windows.json, so a half-built list cannot replace the saved one.
+//
+// The tmux session option @restored marks a finished restore. A session without it was built by
+// a restore that was cut off (the server was killed half-way, 2026-11-17 19:32: the next server
+// found the session with only its first window, skipped the restore and saved that one window
+// over windows.json). Such a session gets the missing windows on the next start. When tmux dies
+// while the server runs, poll calls this again and the windows come back.
 const WINDOWS_FILE = path.join(INST.home, 'windows.json');
 const lastRun = new Map<string, number>(); // window id -> last time an agent ran in it
 let restoring = false;
+let restored = false; // the tmux session holds every saved window: poll may write windows.json
 function ensureSession(): void {
-  if (tmuxSync(['has-session', '-t', S]) !== null) return;
-  tmuxSync(['new-session', '-d', '-s', S, '-n', 'home', '-c', HOME]);
+  if (restoring) return;
+  let fresh = false;
+  let home = ''; // the shell window tmux needs to create the session; closed once a saved window exists
+  if (tmuxSync(['has-session', '-t', S]) === null) {
+    restored = false;
+    const made = tmuxSync(['new-session', '-d', '-P', '-F', '#{window_id}', '-s', S, '-n', 'home', '-c', HOME]);
+    if (made === null) return; // no tmux: try at the next poll
+    home = made.trim();
+    fresh = true;
+  } else if ((tmuxSync(['show-options', '-qv', '-t', S, '@restored']) ?? '').trim() === '1') {
+    restored = true;
+    return;
+  }
   const saved = Restore.load(WINDOWS_FILE);
   let conf = '';
   try {
@@ -280,15 +299,32 @@ function ensureSession(): void {
   void (async () => {
     try {
       await scanElsewhere(); // a session open in VS Code or a terminal is not started a second time
-      const windows = Restore.plan(saved as Parameters<typeof Restore.plan>[0], conf, (sid) => elsewhere.has(sid));
+      let windows = Restore.plan(saved as Parameters<typeof Restore.plan>[0], conf, (sid) => elsewhere.has(sid));
+      if (!fresh) {
+        const rows = await tmux([
+          'list-windows',
+          '-t',
+          S,
+          '-F',
+          '#{@sid}\t#{@label}\t#{window_name}\t#{@folder}\t#{pane_current_path}',
+        ]);
+        windows = Restore.missing(windows, Restore.presentWindows(rows));
+        if (windows.length > 0)
+          console.log(`restore: the tmux session misses ${String(windows.length)} saved window(s); building them`);
+      }
+      let built = 0;
       for (const w of windows) {
         try {
           await createWindow({ name: w.name, folder: w.folder, sid: w.sid, run: w.run, agent: w.agent });
+          built++;
           if (w.run) console.log(`restore: resumed ${w.name} (${w.sid})`);
         } catch (e) {
           console.log(`restore: ${w.name}: ${errMsg(e)}`);
         }
       }
+      if (home && built > 0) await tmux(['kill-window', '-t', home]);
+      await tmux(['set-option', '-t', S, '@restored', '1']);
+      restored = true;
     } finally {
       restoring = false;
     }
@@ -446,10 +482,12 @@ interface Snapshot {
   sessions: Session[];
   ts: number;
   down?: boolean;
+  restoring?: boolean;
   routes?: RouteRecord[];
   defaultFolder?: string;
   computer?: string;
   home?: string;
+  platform?: string;
 }
 let snapshot: Snapshot = { sessions: [], ts: 0 };
 const prevState = new Map<string, string>();
@@ -544,7 +582,10 @@ async function poll(): Promise<void> {
     '#{window_id}\t#{window_index}\t#{window_name}\t#{pane_current_command}\t#{pane_current_path}\t#{@folder}\t#{@sid}\t#{window_activity}\t#{@label}\t#{pane_pid}\t#{@created}\t#{@agent}\t#{@started}\t#{pane_id}';
   const out = await tmux(['list-windows', '-t', S, '-F', fmt]);
   if (out === null) {
-    snapshot = { sessions: [], ts: Date.now(), down: true, computer: COMPUTER, home: HOME };
+    // the tmux session is gone while the server runs (tmux crashed or was killed): build the
+    // windows again from windows.json and resume them, as after a Mac restart
+    ensureSession();
+    snapshot = { sessions: [], ts: Date.now(), down: true, restoring, computer: COMPUTER, home: HOME };
     broadcast();
     return;
   }
@@ -697,12 +738,15 @@ async function poll(): Promise<void> {
   snapshot = {
     sessions,
     ts: Date.now(),
+    restoring,
     routes: routes.slice(0, 30),
     defaultFolder: defaultFolder(),
     computer: COMPUTER,
     home: HOME,
+    // the web panel offers "Choose…" (a macOS folder dialog on the server's screen) only on macOS
+    platform: process.platform,
   };
-  if (!restoring) Restore.save(WINDOWS_FILE, Restore.record(sessions, lastRun));
+  if (restored && !restoring) Restore.save(WINDOWS_FILE, Restore.record(sessions, lastRun));
   broadcast();
   void flushPending();
 }
@@ -804,10 +848,15 @@ async function screenState(id: string, agent: unknown): Promise<string> {
 }
 async function typeMessage(id: string, text: string, agent: Agent = 'claude'): Promise<'sent' | 'menu' | 'stuck'> {
   const { parse, box: boxText } = screenOf(agent);
-  const one = text.replace(/\r?\n/g, ' ');
+  const one = text.replaceAll(/[\r\n]+/g, ' ');
   if ((await screenState(id, agent)) !== 'idle') return 'menu';
-  // clear anything left in the input box (e.g. a copy typed before a menu appeared)
-  if (boxText((await tmux(['capture-pane', '-p', '-J', '-t', id])) ?? '')) await tmux(['send-keys', '-t', id, 'C-u']);
+  // clear anything left in the input box (e.g. a copy typed before a menu appeared). For Claude
+  // always: a copy typed while Claude was starting can still be on its way to the box, which then
+  // looks empty here, and the two copies joined ("/context/context" was no command any more;
+  // a test run, 2026-11-17). Keys arrive in order, so the C-u also clears that late copy.
+  if (agentOf(agent) !== 'codex' || boxText((await tmux(['capture-pane', '-p', '-J', '-t', id])) ?? '')) {
+    await tmux(['send-keys', '-t', id, 'C-u']);
+  }
   await tmux(['send-keys', '-t', id, '-l', '--', one]);
   // A brand-new Claude draws its input box before it reads keys: the typed text shows up
   // 1–3 s later and an Enter sent before that is lost, while the box still looks empty, so it
@@ -831,12 +880,17 @@ async function typeMessage(id: string, text: string, agent: Agent = 'claude'): P
   // Right after a menu (e.g. folder trust) Claude may still be starting and ignore Enter
   // (found in an end-to-end test, 2026-11-09: 1 run of 6 left the task in the box). Keep
   // trying for about 15 s with growing waits.
+  // A Claude Code command can open its own dialog (/model, /resume): a menu right after the Enter
+  // is the command's answer. The command was sent; typing it again later would run it twice.
+  const command = agentOf(agent) !== 'codex' && Commands.parse(text) !== null;
+  let pressed = false;
   for (const wait of [700, 1000, 1500, 2000, 2500, 3000, 3000]) {
-    if ((await screenState(id, agent)) === 'needs') return 'menu';
+    if ((await screenState(id, agent)) === 'needs') return Commands.menuAfterEnter({ command, pressed, echoed });
     await tmux(['send-keys', '-t', id, 'Enter']);
+    pressed = true;
     await sleep(wait);
     const screen = (await tmux(['capture-pane', '-p', '-J', '-t', id])) ?? '';
-    if (parse(screen).state === 'needs') return 'menu';
+    if (parse(screen).state === 'needs') return Commands.menuAfterEnter({ command, pressed, echoed });
     const box = boxText(screen);
     if (!box) {
       if (echoed) return 'sent';
@@ -925,6 +979,7 @@ interface RouteRecord {
   task?: string | undefined;
   parent?: string | undefined;
   part?: string | undefined;
+  command?: boolean | undefined;
 }
 type RoutePatch = Partial<Omit<RouteRecord, 'id' | 'ts'>>;
 // an instance with its own state folder keeps routes.json there; a test server on another port
@@ -939,6 +994,7 @@ try {
 } catch {
   routes = [];
 }
+const commandLists = Commands.cache(); // the Ask box's command lists by folder (lib/commands.ts)
 let routeSeq = Date.now();
 const nextRouteId = (): string => `r${String(++routeSeq)}`;
 function saveRoutes(): void {
@@ -1373,7 +1429,7 @@ async function runDecision(
   if (!has(d.agent) && d.action === 'new') {
     const busy = (d.context_from ?? [])
       .map((cid) => routable().find((x) => x.id === cid))
-      .find((x) => x !== undefined && x.folder === d.folder && queuedCount(x.id) >= Brief.BUSY_QUEUE);
+      .find((x) => x !== undefined && x.folder === d.folder && router.isBusy(x, queuedCount(x.id)));
     if (busy?.agent === 'codex' && Codex.availability().available) newAgent = 'codex';
   }
   // the request without the words that only chose the agent ("用 codex …"): a Codex session
@@ -1444,12 +1500,14 @@ async function runDecision(
     d.action === 'send' &&
     target &&
     (d.confidence ?? 0) >= 0.75 &&
-    queuedCount(target.id) >= Brief.BUSY_QUEUE &&
+    router.isBusy(target, queuedCount(target.id)) &&
     !testScope
   ) {
-    // The user's rule: do not add to a session with a long queue. Start a new session in its
-    // folder and give it the busy session's background (and any other session the router named).
+    // The user's rule: never make a request wait for a session that is still working or has a
+    // queue. Start a new session in its folder and give it the busy session's background (and any
+    // other session the router named).
     const n = queuedCount(target.id);
+    const why = target.state === 'working' ? 'is still working' : `has ${String(n)} messages waiting`;
     const { folder, agent } = router.newSessionChoice(
       prefs,
       fs.existsSync(target.folder) ? target.folder : defaultFolder(),
@@ -1467,7 +1525,7 @@ async function runDecision(
         busy: target.id,
         agent,
         reason:
-          `${target.name} has ${String(n)} messages waiting, so a new session in ${path.basename(folder)} with its background. ${d.reason ?? ''}`.trim(),
+          `${target.name} ${why}, so a new session in ${path.basename(folder)} with its background. ${d.reason ?? ''}`.trim(),
       },
     });
   } else if (d.action === 'send' && target && (d.confidence ?? 0) >= 0.75) {
@@ -2615,6 +2673,35 @@ const actions: Record<string, Action> = {
     await deliver(id, r.task ?? r.text, r.id);
     return { id };
   },
+  // A Claude Code command from the Ask box ("/compact", "/code-review high"). The user chose where it
+  // runs: `target` (a session) or a new session in `folder` (none = the default folder). It never
+  // goes through the router and gets no background text: the session must get the command as typed.
+  async command({ text: textIn, target, folder: folderIn, attachments }) {
+    const text = withAttachments(textOrNull(textIn), attachments); // files become arguments of the command
+    const keys = Commands.typed(text);
+    const cmd = Commands.parse(text);
+    if (keys === null || cmd === null) throw new Error('Not a command. A command starts with /name');
+    await poll();
+    let id = asText(target);
+    let name = 'a new session';
+    let folder = '';
+    if (id) {
+      const s = snapshot.sessions.find((x) => x.id === id);
+      if (!s) throw new Error('No such session');
+      if (agentOf(s.agent) === 'codex') throw new Error('Claude Code commands do not run in a Codex session');
+      name = s.name;
+    } else {
+      folder = asText(folderIn) || defaultFolder();
+      if (!isDir(folder)) throw new Error('Folder not found');
+      id = await createWindow({ name: taskName('', `/${cmd.name}`), folder, sid: '', run: true, agent: 'claude' });
+      await poll();
+    }
+    const rid = nextRouteId();
+    routes.unshift({ id: rid, ts: Date.now(), text: text.trim(), status: 'routing', command: true });
+    setRoute(rid, { decided: 'manual', reason: `You chose ${name}.`, ...(folder ? { folder } : {}) });
+    await deliver(id, keys, rid);
+    return { routeId: rid, id };
+  },
   // Queue a message for a session: sent when Claude there is ready (e.g. after the
   // folder-trust prompt). Used by cross-device handoff (brain/handoff.py --run panel).
   // `attachments`: files a remote client uploaded first (only files in the attachments folder).
@@ -2721,6 +2808,11 @@ const actions: Record<string, Action> = {
         const cmd = ((await tmux(['display-message', '-p', '-t', id, '#{pane_current_command}'])) ?? '').trim();
         if (SHELLS.has(cmd)) break;
       }
+    }
+    // the last window: keep the session with a 'home' shell, so closing every session does not
+    // end the tmux session (a missing session is rebuilt from windows.json as after a crash)
+    if (Restore.isLastWindow(await tmux(['list-windows', '-t', S, '-F', '#{window_id}']), id)) {
+      await tmux(['new-window', '-d', '-t', `${S}:`, '-n', 'home', '-c', HOME]);
     }
     await tmux(['kill-window', '-t', id]);
     return {};
@@ -3049,6 +3141,19 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     sendJson(res, 200, agentsView());
     return;
   }
+  // the Ask box's command list: Claude Code's commands for a new session (the default folder) and
+  // for the folders of the open Claude sessions (lib/commands.ts)
+  if (url.pathname === '/api/commands') {
+    const folders = snapshot.sessions
+      .filter((s) => agentOf(s.agent) !== 'codex' && isDir(s.folder))
+      .map((s) => s.folder);
+    try {
+      sendJson(res, 200, { commands: await commandLists.list(defaultFolder(), folders) });
+    } catch (error) {
+      sendJson(res, 200, { commands: [], error: errMsg(error) });
+    }
+    return;
+  }
   if (url.pathname === '/api/state') {
     sendJson(res, 200, snapshot);
     return;
@@ -3165,6 +3270,19 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const c = chatFor(url.searchParams.get('win') ?? '');
     if (!c) {
       sendJson(res, 404, { error: 'No such session' });
+      return;
+    }
+    // check=1 (the Mac app, before it opens a file Claude sent): only a sent file; its real path and
+    // whether to open it or show it in Finder, no content (lib/media.ts checkOpen)
+    if (url.searchParams.get('check') === '1') {
+      const k = Media.checkOpen(
+        url.searchParams.get('path') ?? '',
+        (p) => wasSentFile(c.items, p),
+        phoneViewFor(c).named,
+        { home: os.homedir(), allowDirs: [ATTACH_DIR] },
+      );
+      if ('error' in k) sendJson(res, k.code, { error: k.error });
+      else sendJson(res, 200, k);
       return;
     }
     const r = Media.checkFile(url.searchParams.get('path') ?? '', phoneViewFor(c).named, {

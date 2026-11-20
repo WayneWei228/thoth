@@ -107,6 +107,42 @@ export function plan(
   return out;
 }
 
+/** A window in the tmux session, as the restore compares it with the saved list. */
+export interface PresentWindow {
+  sid: string;
+  name: string;
+  folder: string;
+}
+
+/** The windows in `tmux list-windows -F '#{@sid}\t#{@label}\t#{window_name}\t#{@folder}\t#{pane_current_path}'`.
+ * name: the label, else the window name; folder: @folder, else the pane's folder (as poll records it). */
+export function presentWindows(text: string | null): PresentWindow[] {
+  return (text ?? '')
+    .split('\n')
+    .filter(Boolean)
+    .map((row) => {
+      const [sid = '', label = '', name = '', folder = '', cwd = ''] = row.split('\t');
+      return { sid, name: label || name, folder: folder || cwd };
+    });
+}
+
+/**
+ * The planned windows that the tmux session does not have yet. A restore that was cut off (the
+ * server was killed half-way) left some windows; the next start builds only the rest.
+ * A window with a session id matches by that id; one without matches by name and folder.
+ */
+export function missing(windows: PlannedWindow[], present: PresentWindow[]): PlannedWindow[] {
+  const sids = new Set(present.map((p) => p.sid).filter(Boolean));
+  const named = new Set(present.map((p) => `${p.name}\n${p.folder}`));
+  return windows.filter((w) => (w.sid ? !sids.has(w.sid) : !named.has(`${w.name}\n${w.folder}`)));
+}
+
+/** Closing window `id` would end the tmux session (it is the only window): a 'home' shell must come first. */
+export function isLastWindow(windowIds: string | null, id: string): boolean {
+  const ids = (windowIds ?? '').split('\n').filter(Boolean);
+  return ids.length === 1 && ids[0] === id;
+}
+
 export function load(file: string): unknown[] | null {
   try {
     const v: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));

@@ -134,8 +134,8 @@ Rules:
 - "ask": unclear. Put the best guesses in alternatives. Also give "folder": the project folder the request most likely belongs to (the folder of your best-guess session, or a known project folder${brain ? '; use the brain tools to find the project when the sessions here do not show it' : ''}). The panel starts a new session there. Leave "folder" empty only when no project fits at all.${defaultFolder ? ' Use "ask" only when the request seems to continue existing work but it is unclear which session, or when it is not a task at all (for example a greeting).' : ''}
 - If the request names a project, app or folder explicitly (for example "pixelshop", "Claude Panel", "study-notes"), that is a clear match (confidence >= 0.8): "send" to that project's session when the topic is related to it, otherwise "new" in that folder.
 - A session with state "elsewhere" cannot receive messages; pick it only if nothing else fits, and then use "ask".
-- A session that is "working" or "stopped" can still receive the request (it waits or starts first).
-- A session with queued_messages >= ${String(BUSY_QUEUE)} is busy: never "send" to it, even when it matches. Use "new" in that session's folder with a short name, put that session's id in context_from, and use that session's agent (a busy Codex session gets a new Codex session) unless the request asks for the other agent. The reason says the session is busy and a new session gets its background.
+- A session that is "stopped" can still receive the request (it starts first).
+- A session is busy when its state is "working" (it is still doing another job) or it has queued_messages >= ${String(BUSY_QUEUE)}. Never "send" to a busy session, even when it matches; the request must not wait for it. Use "new" in that session's folder with a short name, put that session's id FIRST in context_from (plus up to 2 other sessions whose conversation holds background this request needs), and use that session's agent (a busy Codex session gets a new Codex session) unless the request asks for the other agent. Keep confidence as high as the match is clear. The reason says the session is busy (still working, in Chinese "还在工作") and a new session gets its background, in the language of the request.
 - For every "new": put in context_from the ids of up to 3 sessions whose conversation holds background the new session needs for this request (the project, decisions, files). Leave it empty when no session is related.${handoffRule}
 - confidence: 0.0-1.0. Use >= 0.75 only when the match is clear. If your confidence is below 0.75, the action MUST be "ask" (put your best guess first in alternatives).
 - agent: the user can ask for Codex ("用 codex", "让 codex 做", "ask Codex", "with codex") or for Claude. When the request asks for one agent, "send" only to a session of that agent; if none fits, "new" with that agent. For "new", set agent to "codex" only when the request asks for Codex${codexOk ? '' : ' (Codex is not installed on this computer: never choose it)'}; otherwise "claude".
@@ -275,6 +275,13 @@ export function splitTasks(d: Decision | null | undefined, sessions: RouterSessi
     }
     return x;
   });
+}
+
+/** A session the router must not send to (the user's rule, 2026-11-17: a request never waits
+ * for a session that is still working; it gets a new session with that session's background).
+ * Busy: state "working", or `queued` messages waiting (>= BUSY_QUEUE). */
+export function isBusy(s: { state?: string } | undefined, queued = 0): boolean {
+  return s !== undefined && (s.state === 'working' || queued >= BUSY_QUEUE);
 }
 
 /** The router is not sure: the folder for the new session. The user's rule (2026-11-10): do not

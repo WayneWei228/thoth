@@ -3,7 +3,7 @@
 #   macos/build-app.sh [release|debug]   build "Thoth.app" and install it in ~/Applications
 #   macos/build-app.sh --no-install      build "Thoth.app" in macos/build only (verify copies it;
 #                                        the installed app is not touched)
-# There is one app for the user: ~/Applications/Thoth.app, built from main.
+# There is one app for the user: ~/Applications/Thoth.app, built from main (scripts/workflow/deploy.ts main).
 # Branches and worktrees are tried with verify's isolated instances, not with a second app.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
