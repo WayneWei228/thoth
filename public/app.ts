@@ -148,6 +148,7 @@ const esc = (s: string | number | null | undefined): string =>
 const LABEL: Record<string, string> = {
   needs: 'Needs you',
   working: 'Working',
+  starting: 'Starting',
   idle: 'Ready',
   stopped: 'Not running',
   elsewhere: 'Open elsewhere',
@@ -1275,6 +1276,7 @@ const RANK: Record<string, number> = {
   failed: 0,
   working: 1,
   preparing: 1,
+  starting: 1,
   idle: 2,
   elsewhere: 3,
   stopped: 4,
@@ -1839,7 +1841,7 @@ $('#dev-add').addEventListener('click', () => {
 // Add a Computer / Reconnect (AddDeviceController.swift)
 interface DeviceCommand {
   device?: string;
-  /** a Mac on a cloud brain: one prompt for Claude Code there (lib/setup_prompt.ts) */
+  /** a computer on a cloud brain: one prompt for Claude Code there (lib/setup_prompt.ts) */
   prompt?: string;
   mode?: string;
   since?: number | string;

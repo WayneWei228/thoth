@@ -158,6 +158,9 @@ export interface CombineInput {
 export function combine({ running, screen, rec, idleSince = 0, now = Date.now() }: CombineInput): string {
   if (!running) return 'stopped';
   if (!rec || rec.state === 'stopped') return screen.state; // no hooks in this session: the screen
+  // no input box on screen: Claude cannot take keys, even when a hook said idle (a menu or a running
+  // turn from the hooks still wins: a menu replaces the input box)
+  if (screen.state === 'starting' && rec.state === 'idle') return 'starting';
   if (screen.options && screen.options.length >= 2) return 'needs'; // a real menu (key hint + selection)
   if (rec.state === 'idle') return 'idle';
   // working / needs: Esc sends no hook. A screen that stayed idle since the last hook ends it.
@@ -225,8 +228,11 @@ export function createStartGate(settleMs: number = SETTLE_MS): StartGate {
 }
 
 /** What the send action does with a message: a window held for its SessionStart gets it through the
- * delivery queue (typed once Claude is ready); any other window gets it typed now. */
-export const sendMode = (gate: StartGate, id: string): 'queue' | 'type' => (gate.waiting(id) ? 'queue' : 'type');
+ * delivery queue (typed once Claude is ready); a window whose state is 'starting' (no input box: text
+ * typed there waits in the terminal and runs in the shell when Claude exits) is refused; any other
+ * window gets it typed now. */
+export const sendMode = (gate: StartGate, id: string, state: string): 'queue' | 'refuse' | 'type' =>
+  gate.waiting(id) ? 'queue' : state === 'starting' ? 'refuse' : 'type';
 
 /** The send action's check of `tmux send-keys` (null = tmux failed): an error, never an answer that
  * says nothing about a message that was not typed. */

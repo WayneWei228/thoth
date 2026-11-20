@@ -23,7 +23,7 @@ final class AddDeviceController: NSViewController {
     private let state = WrappingLabel(wrappingLabelWithString: "")
     private var create: ActionButton!
     private var copy: ActionButton!
-    /// a Mac on a cloud brain: one prompt for Claude Code there instead of the command (lib/setup_prompt.ts)
+    /// a computer on a cloud brain: one prompt for Claude Code there instead of the command (lib/setup_prompt.ts)
     private var copyPrompt: ActionButton!
     private var prompt = ""
     private var close: ActionButton!
@@ -77,7 +77,7 @@ final class AddDeviceController: NSViewController {
         copy = ActionButton("Copy Command", symbol: "doc.on.doc") { [weak self] in self?.copyCommand() }
         copy.setAccessibilityIdentifier("addDevice.copy")
         copyPrompt = ActionButton("Copy Prompt for Claude Code", symbol: "text.bubble") { [weak self] in self?.copyPromptPressed() }
-        copyPrompt.toolTip = "On a Mac with Claude Code: paste this prompt into Claude Code there. It installs Thoth, joins with this code, keeps the Mac on and checks the result."
+        copyPrompt.toolTip = "On the new computer (macOS, Linux or Windows), paste this prompt into Claude Code. It installs Thoth, joins with this code, keeps the computer on and checks the result."
         copyPrompt.setAccessibilityIdentifier("addDevice.copyPrompt")
         note.font = .systemFont(ofSize: 12)
         note.textColor = .secondaryLabelColor

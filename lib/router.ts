@@ -310,9 +310,12 @@ export function splitTasks(d: Decision | null | undefined, sessions: RouterSessi
 
 /** A session the router must not send to (the user's rule, 2026-11-17: a request never waits
  * for a session that is still working; it gets a new session with that session's background).
- * Busy: state "working", or `queued` messages waiting (>= BUSY_QUEUE). */
-export function isBusy(s: { state?: string } | undefined, queued = 0): boolean {
-  return s !== undefined && (s.state === 'working' || queued >= BUSY_QUEUE);
+ * Busy: state "working", state "starting" (no input box yet; a Claude that hangs at start never
+ * takes the queued text), or `queued` messages waiting (>= BUSY_QUEUE). A window the panel just
+ * started (`held`: the start gate waits for its SessionStart) is not busy for being "starting": the
+ * request waits in its queue and is typed once Claude is ready (review round 2, the owner's answer). */
+export function isBusy(s: { state?: string } | undefined, queued = 0, held = false): boolean {
+  return s !== undefined && (s.state === 'working' || (s.state === 'starting' && !held) || queued >= BUSY_QUEUE);
 }
 
 /** The router is not sure: the folder for the new session. The user's rule (2026-11-10): do not

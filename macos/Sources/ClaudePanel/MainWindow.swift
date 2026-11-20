@@ -552,7 +552,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
             }
             return v
         case .device(let d, let off, let peer):
-            // a helper computer: its name; grey with "offline" when it does not answer; "update needed"
+            // a helper computer: its name and a status dot (green online, hollow offline); grey with "offline" when it does not answer; "update needed"
             // (orange) when it runs an older Thoth, "updating…", or "update failed" (red, the error as tooltip).
             // An older helper that is online gets an "Update" button on the right ("Retry" after a failure);
             // during an update a spinner stands there instead.
@@ -567,13 +567,22 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
                 let why = peer.error.flatMap { $0.isEmpty ? nil : $0 + "\n" } ?? ""
                 l.toolTip = why + (peer.online ? "This computer runs an older Thoth than this Mac." : "Offline: update it when it is back.")
             }
-            let v = NSView(); v.addSubview(img); v.addSubview(l)
+            // the status dot right of the name, as the session rows' dot: green online, hollow offline
+            // (public/helper_update.ts deviceDot)
+            let device = d
+            let dot = StatusDot(); dot.state = off ? .stopped : .idle
+            dot.toolTip = off ? "Offline" : "Online"
+            dot.setAccessibilityElement(true)
+            dot.setAccessibilityRole(.image)
+            dot.setAccessibilityLabel(off ? "Offline" : "Online")
+            dot.setAccessibilityIdentifier("sidebar.device.\(device).status")
+            let v = NSView(); v.addSubview(img); v.addSubview(l); v.addSubview(dot)
             NSLayoutConstraint.activate([
                 img.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8), img.centerYAnchor.constraint(equalTo: v.centerYAnchor),
                 img.widthAnchor.constraint(equalToConstant: 13), img.heightAnchor.constraint(equalToConstant: 13),
                 l.leadingAnchor.constraint(equalTo: img.trailingAnchor, constant: 5), l.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+                dot.leadingAnchor.constraint(equalTo: l.trailingAnchor, constant: 7), dot.centerYAnchor.constraint(equalTo: l.centerYAnchor),
             ])
-            let device = d
             var right: NSView?
             if let peer, peer.showsUpdateButton {
                 let b = NSButton(title: peer.update == "failed" ? "Retry" : "Update", target: self, action: #selector(updateDeviceButton(_:)))
@@ -606,10 +615,10 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
                 v.addSubview(right)
                 NSLayoutConstraint.activate([
                     right.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8), right.centerYAnchor.constraint(equalTo: v.centerYAnchor),
-                    l.trailingAnchor.constraint(lessThanOrEqualTo: right.leadingAnchor, constant: -6),
+                    dot.trailingAnchor.constraint(lessThanOrEqualTo: right.leadingAnchor, constant: -6),
                 ])
             } else {
-                l.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -8).isActive = true
+                dot.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -8).isActive = true
             }
             return v
         case .join(let j):

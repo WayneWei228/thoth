@@ -68,6 +68,8 @@ struct Session: Codable, Hashable {
 
 enum SessionState: String {
     case needs, working, idle, stopped, elsewhere
+    /// Claude runs but has not drawn its input box yet: nothing can be typed into it (lib/screen.ts).
+    case starting
     /// A new session on a helper computer: the code is being copied there (lib/remote_new.ts).
     case preparing
     /// A new session on a helper computer did not start; `last` has the error.
@@ -77,6 +79,7 @@ enum SessionState: String {
         switch self {
         case .needs: return "Needs you"
         case .working: return "Working"
+        case .starting: return "Starting"
         case .idle: return "Ready"
         case .stopped: return "Not running"
         case .elsewhere: return "Open elsewhere"
@@ -89,7 +92,7 @@ enum SessionState: String {
     var rank: Int {
         switch self {
         case .needs, .failed: return 0
-        case .working, .preparing: return 1
+        case .working, .preparing, .starting: return 1
         case .idle: return 2
         case .elsewhere: return 3
         case .stopped: return 4

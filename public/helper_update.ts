@@ -91,6 +91,12 @@ export function deviceGroups<S extends SessionLike>(
   });
 }
 
+/** The status dot next to a helper's name (StatusDot in MainWindow.swift .device): the session dot's
+ * colours, green ("idle") when the computer answers, hollow ("stopped") when it is offline. */
+export function deviceDot(offline: boolean): { state: 'idle' | 'stopped'; label: 'Online' | 'Offline' } {
+  return offline ? { state: 'stopped', label: 'Offline' } : { state: 'idle', label: 'Online' };
+}
+
 /** A unique id for one update click (lib/self_update.ts UPDATE_ID; SessionMenu.newFetchId). */
 export function newUpdateId(): string {
   const b = new Uint8Array(8);
@@ -98,7 +104,8 @@ export function newUpdateId(): string {
   return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
 
-/** A helper computer's sidebar header (MainWindow.swift .device cell): icon, name and note, the
+/** A helper computer's sidebar header (MainWindow.swift .device cell): icon, name and note, a status
+ * dot (online / offline), the
  * colour of the update state, the error as tooltip; on the right the Update / Retry button or a
  * spinner. Right-click opens `onMenu`. Text only (no HTML from the server): the name and the error go
  * in as textContent. */
@@ -122,7 +129,14 @@ export function deviceHeader<S extends SessionLike>(
   t.className = 'dn';
   t.textContent = note === null ? g.device : `${g.device} · ${note}`;
   if (g.peer) t.title = headerTitle(g.peer);
-  h.append(t);
+  const status = deviceDot(g.offline);
+  const dot = document.createElement('span');
+  dot.className = `dot dev-dot ${status.state}`;
+  dot.title = status.label;
+  dot.dataset['testid'] = `sidebar.device.${g.device}.status`;
+  dot.setAttribute('role', 'img');
+  dot.setAttribute('aria-label', status.label);
+  h.append(t, dot);
   if (right === 'spinner') {
     const sp = document.createElement('span');
     sp.className = 'dev-spin';

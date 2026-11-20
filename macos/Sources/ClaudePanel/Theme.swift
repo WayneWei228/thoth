@@ -47,7 +47,7 @@ enum Theme {
     static func color(for state: SessionState) -> NSColor {
         switch state {
         case .needs, .failed: return red
-        case .working, .preparing: return amber
+        case .working, .preparing, .starting: return amber
         case .idle: return green
         case .stopped, .elsewhere: return .secondaryLabelColor
         }

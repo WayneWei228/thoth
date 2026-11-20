@@ -51,7 +51,11 @@ A rendered chat (markdown, code with Copy, tables, math, diagrams, image preview
 - **A new device knows everything from day one** — Connect it, and the agents there can use your work from every other device.
 - **Move work between devices** — Continue a session from another computer on this Mac.
 - **Yours** — The memory lives on your own server ([self-host guide](docs/self-host.md)) or on your Mac. Full transcripts stay on your devices.
-- **Native Mac app** — Swift and AppKit, with a native terminal (SwiftTerm). A web panel runs on Linux.
+- **Helper computers** — A spare Mac, a Linux machine or a Windows PC (through WSL 2) joins as a helper. The request box can start a session on it, its sessions show in your panel, and **Fetch result** brings the work to your main computer. You approve each new helper on your main computer (File > Set Up Devices…); the panel shows whether each helper is online and updates an older one with one click. Helpers connect through a cloud brain ([self-host guide](docs/self-host.md)) and the Thoth relay: no open port, no SSH.
+- **Add a computer with one prompt** — File > Set Up Devices… gives a ready-made prompt. Paste it into Claude Code on the new computer (macOS, Linux, or Windows 10/11): it installs Thoth, joins it to your brain, keeps the computer on if you want (`thoth always-on`) and checks the result (`thoth doctor`).
+- **Native Mac app** — Swift and AppKit, with a native terminal (SwiftTerm).
+- **Web panel** — The same panel in a browser, for Linux or any other computer: sessions, chat, terminal, the request box and your devices.
+- **Slash commands, tidy and restore** — Type `/` in the request box for the session's commands. Select several sessions to close them at once, or let the model tidy the list. After a crash or a restart the panel brings back its sessions, the open page and your drafts.
 - **Composer** — Paste, drop or attach images, PDFs, text, data and code files. Drafts are kept per session.
 - **Notifications** — A notification and a Dock badge when a session needs you.
 - **Open source** — Free and MIT-licensed.
@@ -81,7 +85,10 @@ thoth web               # web panel; on a machine without a desktop it prints ho
 
 ### Windows
 
-The panel does not run on Windows (it needs tmux), and the line above fails in PowerShell (`bash` is not found). A Windows PC joins as a device: install the panel on a Mac or a Linux machine first, then run the PowerShell command that the panel's setup page shows for that PC. Its Claude Code and Codex sessions are then indexed and searchable.
+The panel does not run in Windows itself (it needs tmux), and the line above fails in PowerShell (`bash` is not found). A Windows 10 (version 2004 or newer) or 11 PC can join in two ways:
+
+- **As a helper, in WSL 2**: paste the prompt of File > Set Up Devices… into Claude Code on the PC. It sets up WSL 2, installs Thoth there and joins it. `thoth always-on` keeps the PC and WSL running.
+- **As a device of the brain**: run the PowerShell command that the panel's setup page shows for that PC. Its Claude Code and Codex sessions are then indexed and searchable.
 
 ### Keep it running after logout and reboot
 
@@ -109,7 +116,9 @@ Thoth keeps one memory for all of them. The brain indexes every session and memo
 | `thoth tui` | Attaches to the sessions in tmux |
 | `thoth adopt` | Moves the Codex session you type it in into the panel |
 | `thoth services install \| status \| uninstall` | Background services for the server and the brain |
-| `thoth doctor [--fix]` | Finds faults and names the fix |
+| `thoth setup --role helper \| main` | Joins this computer to your cloud brain, as a helper or as your main computer |
+| `thoth always-on [--status \| --undo]` | Keeps a helper Mac or Windows PC on (no sleep; on Windows, WSL keeps running) |
+| `thoth doctor [--fix \| --json]` | Finds faults and names the fix |
 
 **Move a session into the panel:** in any terminal (VS Code, iTerm, Terminal) where Claude Code is running, type `/panel`. That Claude exits, the panel resumes the same conversation, and the app opens it. For Codex, type `!thoth adopt` in Codex (after its first message): that Codex exits and the panel resumes it with `codex resume`.
 
@@ -196,7 +205,7 @@ Claude Code and Codex. Both run as sessions in the panel, and both can read the 
 
 ### What platforms does it support?
 
-The panel runs on macOS (native app) and Linux (web panel). A Windows PC joins as a device: its sessions are indexed and searchable, but the panel does not run there.
+The panel runs on macOS (native app) and Linux (web panel). A Windows PC runs Thoth in WSL 2 as a helper, or joins as a device whose sessions are indexed and searchable.
 
 ### Where does my data go?
 

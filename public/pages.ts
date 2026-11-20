@@ -29,7 +29,7 @@ export function parseHash(hash: string): Page {
  * (or before the state said which system it runs on). */
 export const canChooseFolder = (platform: string): boolean => platform === '' || platform === 'darwin';
 
-const STATES = new Set(['needs', 'working', 'idle', 'stopped', 'elsewhere']);
+const STATES = new Set(['needs', 'working', 'starting', 'idle', 'stopped', 'elsewhere']);
 /** A session state that is safe as a CSS class name: one of the known states, else "idle". */
 // a new session on a helper (lib/remote_new.ts): preparing looks like working, failed like needs
 const LOOKS: Record<string, string> = { preparing: 'working', failed: 'needs' };

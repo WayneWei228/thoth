@@ -105,19 +105,21 @@ body.side-hidden .side-toggle { display: inline-grid; }
 
 /* ---------- status dot (Icons.swift StatusDot) ---------- */
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--hollow); border: 1.5px solid var(--soft); }
-.dot.needs, .dot.working, .dot.idle { border: 0; }
+.dot.needs, .dot.working, .dot.starting, .dot.idle { border: 0; }
 .dot.needs { background: var(--red); animation: pulse 1.4s linear infinite; }
 .dot.working { background: var(--amber); animation: pulse 2s linear infinite; }
+.dot.starting { background: var(--amber); }
 .dot.idle { background: var(--green); }
 @keyframes pulse { 50% { opacity: .35; } }
 html.website .dot { width: 12px; height: 12px; border: 1.5px solid var(--ink); }
-html.website .dot.stopped, html.website .dot.elsewhere, html.website .dot:not(.needs):not(.working):not(.idle) { background: var(--hollow); border-color: var(--soft); }
+html.website .dot.stopped, html.website .dot.elsewhere, html.website .dot:not(.needs):not(.working):not(.starting):not(.idle) { background: var(--hollow); border-color: var(--soft); }
 
 /* ---------- pill (Icons.swift Pill) ---------- */
 .pill { display: inline-block; flex: none; height: 18px; padding: 0 7px; border-radius: 8px; font: 600 11px/18px var(--sans);
   background: var(--quaternary); color: var(--soft); white-space: nowrap; }
 .pill.needs { background: var(--red); color: #fff; }
 .pill.working { color: var(--amber); background: color-mix(in srgb, var(--amber) 15%, transparent); }
+.pill.starting { color: var(--amber); background: color-mix(in srgb, var(--amber) 15%, transparent); }
 .pill.idle { color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }
 .pill.agent { font-weight: 600; }
 
@@ -490,6 +492,7 @@ body.side-hidden .page.home, body .page.home { padding: 0; }
 .side-h.side-dev.failed { color: var(--red); }
 .ctx button:disabled, html.website .ctx button:disabled { color: var(--tertiary); background: none; }
 .side-h.side-dev.has-right { min-height: 32px; padding-top: 6px; padding-bottom: 3px; }
+.side-h.side-dev .dev-dot { margin-left: 2px; }
 .side-h.side-dev .dn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-h.side-dev .dev-update { margin-left: auto; flex: none; height: 20px; padding: 0 8px; border: 0; border-radius: 5px;
   background: var(--amber); color: #fff; font: 600 11px/20px var(--sans); cursor: default; }

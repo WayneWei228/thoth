@@ -13,7 +13,7 @@ export interface MenuOption {
 }
 
 export interface ScreenState {
-  state: 'needs' | 'working' | 'idle';
+  state: 'needs' | 'working' | 'idle' | 'starting';
   last: string;
   options: MenuOption[];
   selected: number;
@@ -31,18 +31,22 @@ export function parseScreen(text: string): ScreenState {
 
   // choice menu near the bottom: a "❯ option" line plus sibling lines at the same
   // indent (numbered or not). The input box ("❯ " between ─ rules) has no siblings.
+  // AskUserQuestion shows a description of several lines under each option, so its menu
+  // can start 20+ lines above the bottom: look in the last 60 lines.
+  const menu = lines.slice(-60);
   const options: MenuOption[] = [];
   let selected = -1;
   let question = '';
   let at = -1;
-  for (let i = tail.length - 1; i >= Math.max(0, tail.length - 14); i--) {
-    if (/^[\s│]*❯ \S/.test(at0(tail, i))) {
+  let end = -1; // the menu's last line
+  for (let i = menu.length - 1; i >= 0; i--) {
+    if (/^[\s│]*❯ \S/.test(at0(menu, i))) {
       at = i;
       break;
     }
   }
   if (at >= 0) {
-    const col = at0(tail, at).indexOf('❯');
+    const col = at0(menu, at).indexOf('❯');
     const isOpt = (l: string): boolean =>
       l.length > col + 2 &&
       /^[\s│]*$/.test(l.slice(0, col)) &&
@@ -54,25 +58,47 @@ export function parseScreen(text: string): ScreenState {
     const isCont = (l: string): boolean =>
       l.length > col + 3 && /^[\s│]*$/.test(l.slice(0, col + 3)) && /\S/.test(l.slice(col + 3));
     const inMenu = (l: string): boolean => isOpt(l) || isCont(l);
+    // AskUserQuestion puts its last option ("Chat about this") below a ─ rule: a rule between
+    // menu lines is part of the menu
+    const isRule = (l: string): boolean => /^\s*─{3,}\s*$/.test(l);
     let a = at,
       b = at;
-    while (a - 1 >= 0 && inMenu(at0(tail, a - 1))) a--;
-    while (a < at && !isOpt(at0(tail, a))) a++; // a menu starts with an option, not a continuation
-    while (b + 1 < tail.length && inMenu(at0(tail, b + 1))) b++;
+    while (a - 1 >= 0 && (inMenu(at0(menu, a - 1)) || (isRule(at0(menu, a - 1)) && inMenu(at0(menu, a - 2))))) a--;
+    while (a < at && !isOpt(at0(menu, a))) a++; // a menu starts with an option, not a continuation
+    while (b + 1 < menu.length && (inMenu(at0(menu, b + 1)) || (isRule(at0(menu, b + 1)) && isOpt(at0(menu, b + 2)))))
+      b++;
+    end = b;
     const clean = (l: string): string => l.replaceAll('│', ' ').replaceAll(/\s+/g, ' ').trim();
+    const heads: string[] = []; // each option's own line, without the lines below it
     for (let i = a; i <= b; i++) {
-      const line = at0(tail, i);
+      const line = at0(menu, i);
       const prev = options.at(-1);
+      if (isRule(line)) continue;
       if (isOpt(line)) {
-        options.push({ n: options.length + 1, label: clean(line.slice(col + 2)).replace(/^\d+\.\s+/, '') });
+        const head = clean(line.slice(col + 2)).replace(/^\d+\.\s+/, '');
+        options.push({ n: options.length + 1, label: head });
+        heads.push(head);
         if (i === at) selected = options.length;
       } else if (prev) {
         prev.label += ' ' + clean(line);
       }
     }
-    if (options.length >= 2) {
+    // AskUserQuestion: the question is the bordered block ("│ …" lines) just above the menu,
+    // often on several lines; it is the question as a whole.
+    let q0 = a - 1;
+    while (q0 >= 0 && !at0(menu, q0).trim()) q0--;
+    const boxed: string[] = [];
+    for (let i = q0; i >= 0 && /^\s*│/.test(at0(menu, i)); i--) boxed.unshift(clean(at0(menu, i)));
+    // a wrapped line goes on without a space when either side is non-ASCII (CJK has no spaces between words)
+    const joinWrapped = (x: string, y: string): string =>
+      /\P{ASCII}$/u.test(x) || /^\P{ASCII}/u.test(y) ? x + y : `${x} ${y}`;
+    if (options.length >= 2 && boxed.length > 0) {
+      question = boxed.reduce(joinWrapped);
+      // the lines under an AskUserQuestion option are its description, not a wrapped label
+      for (const [i, o] of options.entries()) o.label = heads[i] ?? o.label;
+    } else if (options.length >= 2) {
       for (let i = a - 1; i >= Math.max(0, a - 10); i--) {
-        const q = at0(tail, i)
+        const q = at0(menu, i)
           .replaceAll(/[│╭╰─]/g, '')
           .trim();
         // the first sentence that asks ("Quick safety check: Is this … trust? (Like your …" → up to the "?")
@@ -88,8 +114,9 @@ export function parseScreen(text: string): ScreenState {
   // wrapped line, then "ctrl+x ctrl+s to send now") looks like a menu without one.
   let hinted = false;
   if (options.length > 0) {
-    for (let i = at + 1; i < Math.min(tail.length, at + 2 + options.length + 4); i++) {
-      if (/Esc to cancel|Enter to confirm|Enter to select|to navigate/i.test(at0(tail, i))) {
+    // below the menu's last line: AskUserQuestion puts a rule and "Chat about this" between
+    for (let i = at + 1; i < Math.min(menu.length, end + 6); i++) {
+      if (/Esc to cancel|Enter to confirm|Enter to select|to navigate/i.test(at0(menu, i))) {
         hinted = true;
         break;
       }
@@ -98,7 +125,7 @@ export function parseScreen(text: string): ScreenState {
   // A real menu replaces the input box. A "❯" block above the input box ("❯" + NBSP)
   // is a message in the history (a sent or queued message), never a menu, even when a
   // status line below it happens to read like a key hint ("… · Esc to cancel").
-  const aboveInput = at >= 0 && tail.slice(at + 1).some((l) => /^[\s│]*❯\u00A0/.test(l));
+  const aboveInput = at >= 0 && menu.slice(at + 1).some((l) => /^[\s│]*❯\u00A0/.test(l));
   const validMenu = options.length >= 2 && selected > 0 && hinted && !aboveInput;
 
   // Where to look for "working" signs. With an input box on screen, the spinner line is one
@@ -134,6 +161,12 @@ export function parseScreen(text: string): ScreenState {
   const inputBox = tail.some((l) => /^[\s│]*❯\u00A0/.test(l));
   const promptText = !inputBox && /Do you want to|Enter to confirm · Esc/i.test(tailText);
 
+  // Claude's input box: a "❯" line plus the ─ rules around it. Without it, Claude has not drawn its
+  // screen yet (it is still starting, or hangs at start) and cannot read keys. Such a screen is
+  // 'starting', not 'idle': text typed into it waits in the terminal and goes to the shell when
+  // Claude exits, where zsh runs it (2026-11-17: a handoff prompt ran `bin/thoth restart`).
+  const hasBox = /─{10,}/.test(tailText) && tail.some((l) => /^[\s│─]*❯/.test(l));
+
   let state: ScreenState['state'];
   if (validMenu || promptText) state = 'needs';
   else if (
@@ -141,6 +174,7 @@ export function parseScreen(text: string): ScreenState {
     /^\S\s+\S[^\n]*…\s*\((?:[^()\n]*?\s)?(\d+h\s*)?(\d+m\s*)?\d+s\b/m.test(zoneText)
   )
     state = 'working';
+  else if (!hasBox) state = 'starting';
   else state = 'idle';
 
   // last Claude reply line (⏺ ...)

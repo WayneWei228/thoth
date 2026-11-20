@@ -1964,7 +1964,9 @@ async function runDecision(
   if (!has(d.agent) && d.action === 'new') {
     const busy = (d.context_from ?? [])
       .map((cid) => routable().find((x) => x.id === cid))
-      .find((x) => x !== undefined && x.folder === d.folder && router.isBusy(x, queuedCount(x.id)));
+      .find(
+        (x) => x !== undefined && x.folder === d.folder && router.isBusy(x, queuedCount(x.id), startGate.waiting(x.id)),
+      );
     if (busy?.agent === 'codex' && Codex.availability().available) newAgent = 'codex';
   }
   // the request without the words that only chose the agent ("用 codex …"): a Codex session
@@ -2050,14 +2052,19 @@ async function runDecision(
     d.action === 'send' &&
     target &&
     (d.confidence ?? 0) >= 0.75 &&
-    router.isBusy(target, queuedCount(target.id)) &&
+    router.isBusy(target, queuedCount(target.id), startGate.waiting(target.id)) &&
     !testScope
   ) {
     // The user's rule: never make a request wait for a session that is still working or has a
     // queue. Start a new session in its folder and give it the busy session's background (and any
     // other session the router named).
     const n = queuedCount(target.id);
-    const why = target.state === 'working' ? 'is still working' : `has ${String(n)} messages waiting`;
+    const why =
+      target.state === 'working'
+        ? 'is still working'
+        : target.state === 'starting'
+          ? 'has not started yet'
+          : `has ${String(n)} messages waiting`;
     const { folder, agent } = router.newSessionChoice(
       prefs,
       fs.existsSync(target.folder) ? target.folder : defaultFolder(),
@@ -3066,9 +3073,9 @@ const actions: Record<string, Action> = {
         code: r.code,
         expires: r.expires,
         command: pick(r.commands),
-        // a Mac can instead paste one prompt into Claude Code there (lib/setup_prompt.ts): it installs,
-        // joins with this code, keeps the Mac on and checks the result
-        prompt: SetupPrompt.panelPrompt(dos, r),
+        // the new computer can instead paste one prompt into Claude Code there (lib/setup_prompt.ts): it installs,
+        // joins with this code, keeps the computer on and checks the result
+        prompt: SetupPrompt.panelPrompt(r),
         firewall: null,
       };
     }
@@ -3445,15 +3452,18 @@ const actions: Record<string, Action> = {
       (Array.isArray(attachments) ? attachments : []).map((p) => path.basename(asText(p))).join(' ');
     // Claude is still starting (no SessionStart yet, e.g. right after the folder-trust prompt): keys
     // typed now are lost, so the message waits in the queue and is typed once Claude is ready
-    if (HookState.sendMode(startGate, id) === 'queue') {
+    const target = snapshot.sessions.find((x) => x.id === id);
+    const mode = HookState.sendMode(startGate, id, target?.state ?? '');
+    if (mode === 'queue') {
       await deliver(id, full, null);
       return { queued: true };
     }
+    if (mode === 'refuse')
+      throw new Error('Claude has not started in this window yet (no input box). Try again when it shows Ready.');
     const echo: Echo = { text: shown, at: Date.now(), phase: 'sending' };
     echoes.set(id, [...(echoes.get(id) ?? []), echo]);
     // the box holds unsent text ("Not sent: …" in the panels): the owner's message replaces it
     // (the owner's answer, PR #158)
-    const target = snapshot.sessions.find((x) => x.id === id);
     if (target && Asks.holdsDraft(target)) await tmux(['send-keys', '-t', id, 'C-u']);
     typingInto.add(id);
     const typed = await typeText(id, full.replace(/\r?\n/g, ' '), agentOf(target?.agent)).finally(() =>
